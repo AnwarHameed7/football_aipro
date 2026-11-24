@@ -20,6 +20,7 @@ from PySide6.QtCore import Qt, QSize
 from PySide6.QtGui import QAction, QIcon
 
 from app.video_widget import VideoWidget
+from app.review_window import ReviewWindow
 from app.dashboard_widget import DashboardWidget
 from app.analysis_worker import AnalysisWorker
 from reports.generator import ReportGenerator
@@ -107,6 +108,11 @@ class MainWindow(QMainWindow):
         self.btn_analyze.clicked.connect(self._start_analysis)
         toolbar.addWidget(self.btn_analyze)
 
+        self.btn_review = QPushButton("Video Review")
+        self.btn_review.setEnabled(False)
+        self.btn_review.clicked.connect(self._open_review)
+        toolbar.addWidget(self.btn_review)
+
         self.btn_stop = QPushButton("⏹ Stop")
         self.btn_stop.setEnabled(False)
         self.btn_stop.clicked.connect(self._stop_analysis)
@@ -187,14 +193,29 @@ class MainWindow(QMainWindow):
         if not path:
             return
 
+        if not self.video_widget.load_video(path):
+            QMessageBox.warning(self, "Video unavailable", "Could not read the selected video.")
+            return
         self._target_anchor = None
         self._video_path = path
-        self.video_widget.load_video(path)
+        self.btn_review.setEnabled(True)
         self.btn_analyze.setEnabled(True)
         self.status.showMessage(f"Loaded {os.path.basename(path)}. Pause on a clear frame and click yourself for coaching.")
 
         # Reset results
         self._results = None
+
+    def _open_review(self):
+        if not self._video_path:
+            return
+        self.video_widget.stop()
+        results = self._results or {}
+        players = results.get("player_data", {})
+        selected = players.get(self.dashboard.combo_player.currentData(), {})
+        window = ReviewWindow(self._video_path, results.get("output_video"),
+                              selected.get("movement_review"), self)
+        window.exec()
+        window.deleteLater()
 
     # ── Analysis ────────────────────────────────────────────────
 
@@ -218,6 +239,7 @@ class MainWindow(QMainWindow):
         self.btn_analyze.setEnabled(False)
         self.btn_stop.setEnabled(True)
         self.btn_open.setEnabled(False)
+        self.btn_review.setEnabled(False)
         self.progress_bar.setVisible(True)
         self.progress_bar.setValue(0)
         self.status.showMessage("Analysing…")
@@ -299,6 +321,7 @@ class MainWindow(QMainWindow):
         self.btn_analyze.setEnabled(True)
         self.btn_stop.setEnabled(False)
         self.btn_open.setEnabled(True)
+        self.btn_review.setEnabled(bool(self._video_path))
         self.progress_bar.setVisible(False)
 
     # ── Exports ─────────────────────────────────────────────────

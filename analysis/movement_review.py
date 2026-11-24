@@ -15,6 +15,8 @@ MEASURES = {
     "right_shoulder_angle": "Right upper arm angle relative to torso",
 }
 
+STRIDE_METRIC = "ankle_separation_torso_ratio"
+
 SOURCES = {
     "World Athletics Sprinting Biomechanics Study": "https://worldathletics.org/about-iaaf/documents/research-centre",
     "Schache et al., running and sprinting mechanics": "https://doi.org/10.1249/MSS.0b013e3182084929",
@@ -34,7 +36,7 @@ class MovementReview:
             self.active = (bucket, status, frame_index, [])
         sample = {}
         if pose and pose["confidence"] >= .55:
-            sample = {key: pose[key] for key in MEASURES if pose.get(key) is not None}
+            sample = {key: float(pose[key]) for key in (*MEASURES, STRIDE_METRIC) if pose.get(key) is not None}
         self.active[3].append(sample)
 
     def _finish(self):
@@ -49,6 +51,14 @@ class MovementReview:
                     "label": label, "samples": len(values), "min_deg": round(min(values), 1),
                     "max_deg": round(max(values), 1), "median_deg": round(median(values), 1),
                 }
+
+        stride = [pose[STRIDE_METRIC] for pose in frames if STRIDE_METRIC in pose]
+        if len(stride) >= 3:
+            measures[STRIDE_METRIC] = {
+                "label": "Projected ankle separation relative to torso length",
+                "samples": len(stride), "min_ratio": round(min(stride), 2),
+                "max_ratio": round(max(stride), 2), "median_ratio": round(median(stride), 2),
+            }
 
         cues = []
         if status == "visible":
@@ -96,14 +106,17 @@ def format_review(report):
     samples = sum(span["pose_samples"] for span in spans)
     lines = [
         f"Coverage: {visible}/{total} frames matched · {samples} usable pose samples",
-        "Angles are 2D projections. Compare repetitions filmed from the same angle and at similar speed.",
+        "Angles and ankle separation are 2D projections. Compare repetitions filmed from the same angle and at similar speed.",
         "Review cues are for coaching. Clinical assessment and injury risk require additional evidence.",
         "",
     ]
     for span in spans:
         lines.append(f'{span["start_s"]:.2f}–{span["end_s"]:.2f}s  {span["status"].capitalize()}')
         for metric in span["measurements"].values():
-            lines.append(f'  {metric["label"]}: {metric["min_deg"]:g}–{metric["max_deg"]:g}° (median {metric["median_deg"]:g}°)')
+            unit = "°" if "min_deg" in metric else "× torso"
+            suffix = "deg" if "min_deg" in metric else "ratio"
+            low, high, middle = (metric[f"{key}_{suffix}"] for key in ("min", "max", "median"))
+            lines.append(f'  {metric["label"]}: {low:g}–{high:g}{unit} (median {middle:g}{unit})')
         lines.extend(f"  {cue}" for cue in span["review_cues"])
         lines.append("")
     return "\n".join(lines)

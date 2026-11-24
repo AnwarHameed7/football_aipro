@@ -3,10 +3,12 @@ Football AI Pro - Video Display Widget
 Renders OpenCV frames into a Qt widget for real-time video playback.
 """
 
+import math
+
 import cv2
 import numpy as np
 from PySide6.QtWidgets import (
-    QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton, QSlider, QFrame,
+    QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton, QSlider, QComboBox,
 )
 from PySide6.QtCore import QEvent, Qt, QTimer, Signal
 from PySide6.QtGui import QImage, QPixmap
@@ -31,6 +33,10 @@ class VideoWidget(QWidget):
         self._current_frame = 0
         self._playing = False
         self._source_size = (0, 0)
+        self._frame = None
+        self.overlay = None
+        self.loop_range = None
+        self._speed = 1.0
 
         self._build_ui()
 
@@ -59,18 +65,28 @@ class VideoWidget(QWidget):
         self.btn_play.clicked.connect(self.toggle_play)
         self.btn_play.setEnabled(False)
         controls.addWidget(self.btn_play)
+        for step, label in ((-1, "−1 frame"), (1, "+1 frame")):
+            button = QPushButton(label)
+            button.clicked.connect(lambda checked=False, delta=step: self.step(delta))
+            controls.addWidget(button)
+        speed = QComboBox()
+        for rate in (.25, .5, 1, 1.5, 2):
+            speed.addItem(f"{rate:g}×", rate)
+        speed.setCurrentIndex(2)
+        speed.currentIndexChanged.connect(lambda: self.set_speed(speed.currentData()))
+        controls.addWidget(speed)
 
         self.slider = QSlider(Qt.Horizontal)
         self.slider.setMinimum(0)
         self.slider.setMaximum(100)
         self.slider.setValue(0)
         self.slider.setEnabled(False)
-        self.slider.sliderMoved.connect(self._seek)
+        self.slider.valueChanged.connect(self.seek)
         controls.addWidget(self.slider, stretch=1)
 
         self.time_label = QLabel("00:00 / 00:00")
         self.time_label.setObjectName("metricLabel")
-        self.time_label.setFixedWidth(100)
+        self.time_label.setMinimumWidth(145)
         controls.addWidget(self.time_label)
 
         layout.addLayout(controls)
@@ -96,48 +112,65 @@ class VideoWidget(QWidget):
         """Display a single OpenCV BGR frame."""
         if frame is None or frame.size == 0:
             return
+        self._frame = frame
+        self.refresh_frame()
+
+    def full_frame_pixmap(self):
+        if self._frame is None:
+            return
+        frame = self.overlay(self._frame, self._current_frame) if self.overlay else self._frame
         rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
         h, w, ch = rgb.shape
         self._source_size = (w, h)
-        bytes_per_line = ch * w
-        qimg = QImage(rgb.data, w, h, bytes_per_line, QImage.Format_RGB888)
-        pixmap = QPixmap.fromImage(qimg)
+        return QPixmap.fromImage(QImage(rgb.data, w, h, ch * w, QImage.Format_RGB888))
 
-        # Scale to fit the label while keeping aspect ratio
-        scaled = pixmap.scaled(
-            self.display.size(), Qt.KeepAspectRatio, Qt.SmoothTransformation
-        )
-        self.display.setPixmap(scaled)
+    def refresh_frame(self):
+        pixmap = self.full_frame_pixmap()
+        if pixmap is None:
+            return
+        self.display.setPixmap(pixmap.scaled(
+            self.display.contentsRect().size(), Qt.KeepAspectRatio, Qt.SmoothTransformation
+        ))
+
+    @property
+    def frame_index(self):
+        return self._current_frame
+
+    @property
+    def fps(self):
+        return self._fps
+
+    @property
+    def frame_count(self):
+        return self._total_frames
+
+    @property
+    def frame_size(self):
+        return self._source_size
 
     def load_video(self, path: str):
-        """Load a video file for playback."""
-        self.stop()
-        if self._cap:
-            self._cap.release()
-
-        self._cap = cv2.VideoCapture(path)
-        if not self._cap.isOpened():
-            return
-
-        self._fps = self._cap.get(cv2.CAP_PROP_FPS) or 30.0
-        self._total_frames = int(self._cap.get(cv2.CAP_PROP_FRAME_COUNT))
-        self._current_frame = 0
-
-        self.slider.setMaximum(max(self._total_frames - 1, 1))
-        self.slider.setValue(0)
+        cap = cv2.VideoCapture(path)
+        ok, frame = cap.read()
+        if not ok or frame is None:
+            cap.release()
+            return False
+        self.release()
+        self._cap = cap
+        fps = cap.get(cv2.CAP_PROP_FPS)
+        self._fps = fps if math.isfinite(fps) and fps > 0 else 30.0
+        self._total_frames = max(1, int(cap.get(cv2.CAP_PROP_FRAME_COUNT)))
+        self.loop_range = None
         self.slider.setEnabled(True)
         self.btn_play.setEnabled(True)
-
-        # Show first frame
-        ret, frame = self._cap.read()
-        if ret:
-            self.show_frame(frame)
-            self._cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
-
-        self._update_time_label()
+        self.slider.blockSignals(True)
+        self.slider.setMaximum(self._total_frames - 1)
+        self.slider.blockSignals(False)
+        self._display_position(frame, 0)
+        return True
 
     def show_placeholder(self, text: str = "Load a video to begin"):
         """Show placeholder text."""
+        self._frame = None
         self.display.clear()
         self.display.setText(text)
         self.display.setStyleSheet(
@@ -153,10 +186,15 @@ class VideoWidget(QWidget):
     def play(self):
         if self._cap is None or not self._cap.isOpened():
             return
+        if self.loop_range:
+            first, last = self.loop_range
+            if not first <= self.frame_index < last:
+                self.seek(first)
+        elif self.frame_index == self.frame_count - 1:
+            self.seek(0)
         self._playing = True
         self.btn_play.setText("⏸")
-        interval = max(1, int(1000 / self._fps))
-        self._timer.start(interval)
+        self._timer.start(max(1, round(1000 / (self._fps * self._speed))))
 
     def stop(self):
         self._playing = False
@@ -171,49 +209,62 @@ class VideoWidget(QWidget):
 
     # ── Internal ────────────────────────────────────────────────
 
+    def set_speed(self, speed):
+        self._speed = speed
+        if self._playing:
+            self._timer.start(max(1, round(1000 / (self._fps * self._speed))))
+
+    def step(self, delta):
+        self.stop()
+        self.seek(self._current_frame + delta)
+
     def _tick(self):
         if self._cap is None:
+            self.stop()
+            return
+        if self.loop_range and self.frame_index >= self.loop_range[1]:
+            self.seek(self.loop_range[0])
+            return
+        if self.frame_index >= self.frame_count - 1:
             self.stop()
             return
         ret, frame = self._cap.read()
         if not ret:
             self.stop()
-            self._cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
-            self._current_frame = 0
             return
+        self._display_position(frame, self._current_frame + 1)
 
-        self._current_frame = max(0, int(self._cap.get(cv2.CAP_PROP_POS_FRAMES)) - 1)
-        self.show_frame(frame)
-        self.slider.blockSignals(True)
-        self.slider.setValue(self._current_frame)
-        self.slider.blockSignals(False)
-        self._update_time_label()
-        self.frame_changed.emit(self._current_frame)
-
-    def _seek(self, position: int):
+    def seek(self, position):
         if self._cap is None:
-            return
-        self._cap.set(cv2.CAP_PROP_POS_FRAMES, position)
+            return False
+        position = max(0, min(self._total_frames - 1, position))
+        if position == self._current_frame and self._frame is not None:
+            return True
+        if int(self._cap.get(cv2.CAP_PROP_POS_FRAMES)) != position:
+            if not self._cap.set(cv2.CAP_PROP_POS_FRAMES, position):
+                return False
         ret, frame = self._cap.read()
         if ret:
-            self.show_frame(frame)
-            self._current_frame = position
-            self._update_time_label()
+            self._display_position(frame, position)
+        else:
+            self.slider.blockSignals(True)
+            self.slider.setValue(self._current_frame)
+            self.slider.blockSignals(False)
+        return bool(ret)
+
+    def _display_position(self, frame, position):
+        self._current_frame = position
+        self.show_frame(frame)
+        self.slider.blockSignals(True)
+        self.slider.setValue(position)
+        self.slider.blockSignals(False)
+        self._update_time_label()
+        self.frame_changed.emit(position)
 
     def _update_time_label(self):
-        if self._fps <= 0:
-            self.time_label.setText("--:-- / --:--")
-            return
-        cur_sec = self._current_frame / self._fps
-        total_sec = self._total_frames / self._fps
-        cur_m, cur_s = int(cur_sec // 60), int(cur_sec % 60)
-        tot_m, tot_s = int(total_sec // 60), int(total_sec % 60)
-        self.time_label.setText(f"{cur_m:02d}:{cur_s:02d} / {tot_m:02d}:{tot_s:02d}")
+        seconds = self._current_frame / self._fps
+        self.time_label.setText(f"{seconds:07.3f}s · {self._current_frame + 1}/{self._total_frames}")
 
     def resizeEvent(self, event):
-        """Re-scale current frame on resize."""
         super().resizeEvent(event)
-        pix = self.display.pixmap()
-        if pix and not pix.isNull():
-            # Trigger a re-render of the current frame when resized
-            pass
+        self.refresh_frame()

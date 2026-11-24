@@ -235,7 +235,7 @@ class BiomechanicsAnalyzer:
         return result
 
     def _analyze_stride(self, kp: np.ndarray) -> Dict[str, Any]:
-        """Estimate stride length from ankle separation."""
+        """Measure projected ankle separation and image-plane alignment."""
         result: Dict[str, Any] = {}
 
         la = kp[KP_LEFT_ANKLE]
@@ -244,6 +244,11 @@ class BiomechanicsAnalyzer:
         if la[0] > 0 and la[1] > 0 and ra[0] > 0 and ra[1] > 0:
             stride_px = float(np.linalg.norm(la - ra))
             result["stride_length_px"] = round(stride_px, 1)
+            torso = kp[[KP_LEFT_SHOULDER, KP_RIGHT_SHOULDER, KP_LEFT_HIP, KP_RIGHT_HIP]]
+            if np.all(torso > 0):
+                torso_length = np.linalg.norm(torso[:2].mean(axis=0) - torso[2:].mean(axis=0))
+                if torso_length >= 8:
+                    result["ankle_separation_torso_ratio"] = round(stride_px / float(torso_length), 3)
 
             # Ground contact proxy: lower ankle y = closer to ground
             result["left_ankle_y"] = round(float(la[1]), 1)

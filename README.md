@@ -92,3 +92,15 @@ All parameters are in `config/settings.py`:
 - ReID matching parameters
 - Heatmap and visualisation settings
 - Score component weights
+
+## Match and technique review
+
+Open footage in the desktop app and select **Video Review**. Run personal analysis first to use the annotated skeleton video and turn timestamped coaching cues into tags. Use the original view to inspect clean footage.
+
+- Set an in and out frame, then create a tag with a category, player or team, and your coaching feedback. Filter the clip list for tactical themes, opponents, or specific players. Select a row to jump to the clip. Enable **Loop** to repeat the selected interval.
+- Use frame stepping and (0.25×) or (0.5×) playback to review footwork. Use **Line**, **Arrow**, or **Angle** on a paused frame. Select the joint as the middle point for an angle. The overlay measures angles in the image plane. The automated review can also report projected ankle separation as a ratio to torso length, which varies with camera angle and does not measure distance traveled per stride.
+- Open a reference clip next to the original. Turn synchronization off, seek each video to a comparable instant, then select **Align current frames**. Subsequent synchronized seeks use timestamps, including for clips with different frame rates.
+- Save the review as JSON and reopen it with the matching video. Export a tag list as CSV, a full-resolution frame as PNG, or an annotated MP4 interval. MP4 export contains video only. Annotations appear on their selected frames.
+- Run `streamlit run streamlit_app.py` and open **Coach Feedback** in a browser on a device that can reach the app. Upload a clip, add timestamped feedback, and download its review JSON. Share the JSON and original footage with the athlete. This workflow uses file exchange.
+
+Workflow references include [Hudl live analysis and event tagging](https://www.hudl.com/blog/high-performance-workflows-live-analysis-review), [TechniqueView](https://www.techniqueview.com/), [Kinovea](https://kinovea.org/), [Onform video analysis](https://onform.com/video-analysis-for-coaches/), and [CoachNow Analyze](https://coachnow.com/analyze).
