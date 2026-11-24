@@ -2,24 +2,36 @@
 __pycache__/
 *.py[cod]
 *$py.class
-.venv
+.venv/
+.football-coach/
 venv/
 ENV/
 env/
+*.egg-info/
 
 # PyInstaller
 build/
 dist/
 *.spec
 
-# Weights & Models
-# Keep weights if they are small, but usually, we ignore them and provide a download script
-# weights/*.pt
+# Weights & Models (download at runtime)
+*.pt
+*.onnx
 
 # IDEs
 .vscode/
 .idea/
+*.swp
+*.swo
 
 # OS
 .DS_Store
 Thumbs.db
+
+# Build helpers
+_builder.py
+
+# Temp / output
+*.mp4
+*.avi
+output/

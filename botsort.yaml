@@ -1,0 +1,15 @@
+# Football AI Pro - BoTSORT tracker config
+# Tuned for outdoor football: longer track buffer, higher confidence
+tracker_type: botsort
+track_high_thresh: 0.35
+track_low_thresh: 0.1
+new_track_thresh: 0.4
+track_buffer: 120
+match_thresh: 0.85
+# Appearance
+fuse_score: True
+# GMC (global motion compensation) — helps with camera movement
+gmc_method: sparseOptFlow
+proximity_thresh: 0.5
+appearance_thresh: 0.25
+with_reid: False
