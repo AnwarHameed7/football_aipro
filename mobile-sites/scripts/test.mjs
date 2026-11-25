@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import {PlayerLock, attemptReview, coachReview, metrics, seekFrame} from '../web/pose.js';
-import {PoseEngineError, modelWithin, withPoseFallback} from '../web/pose-engine.js';
+import {PlayerSelectionError, PoseEngineError, modelWithin, withPoseFallback} from '../web/pose-engine.js';
+import {mergePlayers, playerCrop, tappedPlayer, uncropPoint} from '../web/player-selection.js';
 import {calibratePitch, estimateId, eventTotals, suggestBallEvents, tacticalZones, unreviewedEstimates} from '../web/match.js';
 import {outcomeRate, planFor} from '../web/training.js';
 import worker from '../dist/server/index.js';
@@ -38,6 +39,27 @@ await assert.rejects(withPoseFallback(async()=>{throw new Error('Video stopped s
 }),/Video stopped seeking/);
 assert.equal(engineOpens,1);
 
+const selectionModes=[];
+await assert.rejects(withPoseFallback(async()=>{throw new PlayerSelectionError();},{
+  compatible:true,signal:new AbortController().signal,
+  open:async mode=>{selectionModes.push(mode);return {close(){}};},
+}),/Your selection is still marked/);
+assert.deepEqual(selectionModes,['simple','cpu']);
+
+const selectedCrop=playerCrop({x:.025,y:.9},.35,1080,1920);
+assert.equal(selectedCrop.x,0);
+assert.deepEqual(uncropPoint({x:.5,y:0},selectedCrop),
+  {x:selectedCrop.side/2160,y:selectedCrop.y/1920});
+const candidate=x=>({
+  points:[{x,y:.43},{x:x+.013,y:.45},{x:x+.006,y:.50}],
+  sig:{center:{x:x+.006,y:.46},torso:.035}
+});
+const small=candidate(.28),other=candidate(.34);
+assert.equal(tappedPlayer([small,other],{x:.286,y:.46},480,854),small);
+assert.equal(tappedPlayer([small,other],{x:.20,y:.46},480,854),null);
+assert.equal(tappedPlayer([small,candidate(.282)],{x:.286,y:.46},480,854),null);
+assert.deepEqual(mergePlayers([small], [candidate(.284),other]),[small,other]);
+
 function kit(bin,x) {
   const bins=new Float32Array(64);
   bins[bin]=1;
@@ -49,6 +71,14 @@ assert.equal(lock.match([kit(22,.24)]).state,'lost');
 assert.equal(lock.match([kit(1,.8),kit(1,.78)]).state,'lost');
 assert.deepEqual([.8,.81,.82].map(x=>lock.match([kit(1,x),kit(22,.24)]).state),
   ['checking','checking','reacquired']);
+
+const bodyReference=kit(1,.2).sig;
+bodyReference.lower=kit(5,.2).sig.bins;
+const sameShirt=kit(1,.206),sameBody=kit(1,.210);
+sameShirt.sig.lower=kit(8,.2).sig.bins;
+sameBody.sig.lower=bodyReference.lower;
+const bodyLock=new PlayerLock(bodyReference);
+assert.equal(bodyLock.match([sameShirt,sameBody]).person,sameBody);
 
 const points=Array.from({length:33},()=>({x:.55,y:.3,z:0,visibility:1}));
 points[23]={x:.4,y:.5,z:0,visibility:1};

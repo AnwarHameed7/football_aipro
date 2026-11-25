@@ -58,9 +58,9 @@ function loadSource(file, replace=true) {
   $('attackDirection').value='right';$('eventForm').reset();$('markEventTime').hidden=true;renderMatch();
   anchor=null;selecting=false;reconnecting=false;previousPose=null;pose=null;coaching=null;markedMoment=null;renderCoaching();$('candidates').replaceChildren();updateCanvasMode();updateTargetControls();
   $('trackBadge').hidden=true;
-  status('selectionHelp','Pause when your full body is visible, then tap Select me.');
+  status('selectionHelp','Pause where your torso is visible, then tap Select me.');
   resetEditor(); renderTags(); renderReport(); range(); updatePosePanel();
-  status('poseStatus','Pause with your full body visible, then select yourself.');
+  status('poseStatus','Pause where your torso is visible, then select yourself.');
   status('videoStatus', 'Opening clip…');
   return true;
 }
@@ -228,10 +228,10 @@ canvas.onpointerup = event => {
     pose=null;coaching=null;markedMoment=null;matchSamples=[];ballSamples=[];renderCoaching();renderMatch();
     $('candidates').replaceChildren();
     selecting=false; updateCanvasMode(); updateTargetControls();
-    status('selectionHelp',previousPose?'Reconnect point marked. Tap Track me to keep the earlier track and rescan from here.':
-      'Selection marked. Tap Track me to follow this player through the clip.');
+    status('selectionHelp',previousPose?'Reconnect point marked. Keeping the earlier track and rescanning from here.':
+      'Selection marked. Checking this player and nearby frames.');
     status('poseStatus',`Player selected at ${anchor.time.toFixed(2)} s.`);
-    paint();updatePosePanel();return;
+    paint();updatePosePanel();$('scanPose').click();return;
   }
   if (pendingFrame !== frame()) pending = [];
   pendingFrame = frame(); pending.push([x,y]);
@@ -421,7 +421,7 @@ function drawTarget(ctx,rect,sample) {
 function updateTrackBadge(sample) {
   const badge=$('trackBadge');
   let state,label;
-  if(selecting) [state,label]=['selecting','Tap your chest in the video'];
+  if(selecting) [state,label]=['selecting','Tap your torso in the video'];
   else if(scanJob) [state,label]=['checking','Analyzing your track'];
   else if(sample?.state==='checking') [state,label]=['checking','Checking possible re-entry'];
   else if(sample && !sample.points) [state,label]=['lost','You’re off-screen or the match is unclear'];
@@ -443,7 +443,7 @@ $('choosePlayer').onclick=()=>{
   video.pause();pending=[];pendingPitch=null;pendingGoal=null;team?.cancelPick();selecting=!selecting;
   if(selecting) {
     $('tool').value='Pointer';
-    status('selectionHelp','Tap your chest in the video. Choose a frame where you’re clear of other players.');
+    status('selectionHelp','Tap your torso in the video. Tracking starts as soon as you tap.');
   } else {
     status('selectionHelp',anchor?'Selection kept. Tap Track me to run the analysis.':'Pause on a clear frame, then tap Select me.');
   }
@@ -515,7 +515,9 @@ $('scanPose').onclick=async()=>{
     job.signal.throwIfAborted();
     scanMessage='Loading the pose model. The first scan may take longer.';
     status('poseStatus',scanMessage);updateLiveCoach(null);
-    const result=await analyze({url:sourceUrl,sourceVideo:video,anchor,end:last>first && last/fps()>anchor.time ? (last+1)/fps() : video.duration,
+    const inRange=last>first&&anchor.time>=first/fps()&&anchor.time<(last+1)/fps();
+    const result=await analyze({url:sourceUrl,sourceVideo:video,anchor,
+      start:previousPose?anchor.time:inRange?first/fps():0,end:inRange?(last+1)/fps():video.duration,
       lookForBall:$('ballCues').checked,signal:job.signal,onRetry:()=>{
         $('poseProgress').removeAttribute('value');$('liveProgress').removeAttribute('value');
         scanMessage='Restarting with a more compatible pose model…';
@@ -538,8 +540,8 @@ $('scanPose').onclick=async()=>{
     status('poseStatus',`${matched} of ${result.frames.length} samples matched. Ambiguous frames were left as gaps.`+
       (result.poseOutline?' Outline estimated from visible joints.':'')+
       (result.ballUnavailable?' Ball tracking was unavailable for this scan.':''));
-    const firstVisible=result.frames.find(frame=>frame.points);
-    renderReport();seek(firstVisible?.time??anchor.time);paint();updatePosePanel();
+    const selectedFrame=result.frames.find(frame=>frame.points&&frame.time>=anchor.time-.001);
+    renderReport();seek(selectedFrame?.time??anchor.time);paint();updatePosePanel();
   } catch(error) {
     if(source===clip&&generation===scanGeneration) {
       scanFailure=job.signal.aborted?'Tracking stopped. Tap Track me to retry.':
@@ -828,7 +830,7 @@ function updateCoaching() {
         cue:'Replay the moment with the receiver and defenders in view. Compare when you look up with when the passer has the ball.'}]};
   } else coaching=attemptReview(pose.frames,markedMoment,mode,$('kickSide').value,aspect);
   if(pose) {report=poseReport(pose);renderReport();}
-  renderCoaching();
+  renderCoaching();renderClipCoaching();
 }
 $('coachMode').onchange=()=>{markedMoment=null;updateCoaching();};
 $('kickSide').onchange=updateCoaching;
@@ -838,8 +840,50 @@ $('markMoment').onclick=()=>{
   video.pause();markedMoment=video.currentTime;updateCoaching();
   $('coachPanel').scrollIntoView({block:'start'});
 };
+function renderClipCoaching() {
+  const panel=$('clipCoaching'),list=$('clipCoachingList');
+  panel.hidden=!pose;
+  list.replaceChildren();
+  if(!pose)return;
+  const aspect=video.videoWidth/video.videoHeight;
+  const eventEstimates=suggestBallEvents(pose.ballSamples||[],goalPoints);
+  const context={frames:pose.frames,ballSamples:pose.ballSamples||[],eventSuggestions:eventEstimates};
+  const reviewed=[];
+  for(const mode of ['acceleration','braking','touch','dribble','landing','pass','kick']) {
+    const moments=skillMoments(mode,context);
+    const eventKind=mode==='kick'?'shot':mode;
+    const moment=moments.find(({time,label})=>{
+      if(mode==='kick'||mode==='pass') {
+        if(!eventEstimates.some(event=>event.kind===eventKind&&event.time>=time&&event.time-time<.6))return false;
+      }
+      if(mode==='dribble'&&!context.ballSamples.some(sample=>sample.nearYou&&Math.abs(sample.time-time)<.35))return false;
+      return label&&attemptReview(pose.frames,time,mode,$('kickSide').value,aspect).findings.length;
+    });
+    if(!moment)continue;
+    const findings=attemptReview(pose.frames,moment.time,mode,$('kickSide').value,aspect).findings;
+    const finding=skills[mode].foot?findings.find(item=>item.observation.includes('ankles')):findings[0];
+    if(!finding)continue;
+    reviewed.push({mode,moment,finding,drill:planFor(mode,[finding]).items[0]});
+  }
+  status('clipCoachingStatus',reviewed.length?
+    'These are suggested moments. Watch each one to check the action and open its full drill.':
+    'The scan did not find enough evidence to suggest another skill moment. You can still select a review type and mark the moment yourself.');
+  for(const {mode,moment,finding,drill} of reviewed.sort((a,b)=>a.moment.time-b.moment.time)) {
+    const item=element('li','');
+    item.append(element('strong',`${skills[mode].label} · ${moment.time.toFixed(2)} s`),
+      element('p',finding.observation));
+    if(drill)item.append(element('p',`${drill.name} · ${drill.work} · ${drill.rest}`));
+    item.append(button('Watch and review',()=>{
+      video.pause();$('coachMode').value=mode;markedMoment=moment.time;
+      seek(moment.time);updateCoaching();$('footage').scrollIntoView();
+    }));
+    list.append(item);
+  }
+}
+
 function renderCoaching() {
   const list=$('coachFindings');list.replaceChildren();
+  if(!pose) { $('clipCoaching').hidden=true;$('clipCoachingList').replaceChildren(); }
   updateLiveCoach(poseAt(video.currentTime));
   drawMovementMap($('movementMap'),pose?.frames||[]);
   renderTraining();

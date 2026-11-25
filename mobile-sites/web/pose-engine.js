@@ -4,6 +4,11 @@ const MODELS='https://storage.googleapis.com/mediapipe-models';
 const MOVE_NET='https://www.kaggle.com/models/google/movenet/tfJs/multipose-lightning/1/model.json?tfjs-format=file';
 
 export class PoseEngineError extends Error {}
+export class PlayerSelectionError extends Error {
+  constructor() {
+    super('I couldn’t confirm who you tapped. Your selection is still marked. Use Change selection to tap your torso when it is visible.');
+  }
+}
 
 export function modelWithin(promise,signal,timeout,onLateResult) {
   return new Promise((resolve,reject)=>{
@@ -159,6 +164,7 @@ async function openPose(mode,signal) {
 
 export async function withPoseFallback(run,{signal,compatible,onRetry,open=openPose}) {
   const modes=compatible?['simple','cpu']:['full','simple','cpu'];
+  let selectionFailure;
   for(const [index,mode] of modes.entries()) {
     signal.throwIfAborted();
     let engine;
@@ -169,7 +175,9 @@ export async function withPoseFallback(run,{signal,compatible,onRetry,open=openP
       return await run(engine);
     } catch(error) {
       signal.throwIfAborted();
-      if(!(error instanceof PoseEngineError))throw error;
+      if(error instanceof PlayerSelectionError)selectionFailure=error;
+      else if(!(error instanceof PoseEngineError))throw error;
+      if(index===modes.length-1&&selectionFailure)throw selectionFailure;
       if(index===modes.length-1)throw new Error(
         'The pose models could not run on this device. Reload the page in Safari and try tracking a short clip.');
     } finally {

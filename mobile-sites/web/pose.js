@@ -1,5 +1,7 @@
 import {maskContours,poseContours} from './highlight.js';
-import {appleMobile,closeModel,objectModel,PoseEngineError,withPoseFallback} from './pose-engine.js';
+import {appleMobile,closeModel,objectModel,PlayerSelectionError,PoseEngineError,withPoseFallback} from './pose-engine.js';
+import {kitDistance,mergePlayers,PlayerLock,playerCrop,playerSignature,tappedPlayer,uncropPoint} from './player-selection.js';
+export {PlayerLock} from './player-selection.js';
 export const BONES = [[11,12],[11,13],[13,15],[12,14],[14,16],[11,23],[12,24],[23,24],
   [23,25],[25,27],[27,29],[29,31],[24,26],[26,28],[28,30],[30,32]];
 let peoplePromise;
@@ -8,85 +10,6 @@ export const playerDetector=()=>peoplePromise ||= objectModel('people')
   .catch(error=>{peoplePromise=null;throw error;});
 
 function average(a,b) { return {x:(a.x+b.x)/2,y:(a.y+b.y)/2}; }
-function signature(points, context) {
-  const torsoPoint=p=>p&&Number.isFinite(p.x)&&Number.isFinite(p.y)&&(p.visibility??1)>=.30;
-  const shoulders=[points[11],points[12]].filter(torsoPoint),hips=[points[23],points[24]].filter(torsoPoint);
-  if(!shoulders.length||!hips.length||shoulders.length+hips.length<3)return null;
-  const shoulder=shoulders.length===2?average(...shoulders):shoulders[0];
-  const hip=hips.length===2?average(...hips):hips[0];
-  const torso=Math.hypot(shoulder.x-hip.x,shoulder.y-hip.y);
-  if (torso < .018) return null;
-  const center=average(shoulder,hip);
-  const width=context.canvas.width, height=context.canvas.height;
-  const halfX=Math.max(3,Math.min(.12,Math.max((shoulders.length===2?Math.abs(shoulders[0].x-shoulders[1].x)*.28:0),torso*.19))*width);
-  const halfY=Math.max(3,Math.min(.13,Math.abs(shoulder.y-hip.y)*.30)*height);
-  const x=Math.max(0,Math.floor(center.x*width-halfX)), y=Math.max(0,Math.floor(center.y*height-halfY));
-  const w=Math.min(width-x,Math.ceil(halfX*2)), h=Math.min(height-y,Math.ceil(halfY*2));
-  if (w<3 || h<3) return null;
-  const data=context.getImageData(x,y,w,h).data, bins=new Float32Array(64);
-  for(let i=0;i<data.length;i+=4) {
-    const r=data[i],g=data[i+1],b=data[i+2];
-    const light=Math.max(55,r,g,b);
-    const bin=(Math.min(3,Math.floor(4*r/(light+1)))<<4) |
-      (Math.min(3,Math.floor(4*g/(light+1)))<<2) | Math.min(3,Math.floor(4*b/(light+1)));
-    bins[bin]+=1/(data.length/4);
-  }
-  return {bins,hip,center,torso,shape:shoulders.length===2?Math.abs(shoulders[0].x-shoulders[1].x)/torso:0};
-}
-function kitDistance(a,b) {
-  let shared=0;
-  for(let i=0;i<a.bins.length;i++) shared+=Math.sqrt(a.bins[i]*b.bins[i]);
-  return Math.sqrt(Math.max(0,1-shared)) + .07*Math.min(1,Math.abs(a.shape-b.shape));
-}
-
-export class PlayerLock {
-  constructor(signature) {
-    this.seed=signature;
-    this.last=signature;
-    this.missing=0;
-    this.pending=null;
-    this.streak=0;
-  }
-
-  match(people) {
-    const distance=(a,b)=>Math.hypot(a.hip.x-b.hip.x,a.hip.y-b.hip.y);
-    const scores=people.map(person=>{
-      const colour=kitDistance(this.seed,person.sig);
-      const spatial=distance(this.last,person.sig);
-      return {person,colour,spatial,score:colour+(this.missing ? 0 : Math.min(.30,spatial*1.2))};
-    }).sort((a,b)=>a.score-b.score);
-    const [best,second]=scores;
-    let person=null,state='lost';
-    if (best && best.colour<(this.missing ? .36 : .50) &&
-        (!second || second.score-best.score>(this.missing ? .10 : .05))) {
-      if(!this.missing && best.spatial<.16) {
-        person=best.person;
-        state='tracked';
-      } else {
-        const sameCandidate=this.pending && kitDistance(this.pending,best.person.sig)<.20 &&
-          distance(this.pending,best.person.sig)<.12;
-        this.streak=sameCandidate ? this.streak+1 : 1;
-        this.pending=best.person.sig;
-        state='checking';
-        if(this.streak>=3) {
-          person=best.person;
-          state='reacquired';
-        }
-      }
-    } else {
-      this.pending=null;
-      this.streak=0;
-    }
-    if(person) {
-      this.last=person.sig;
-      this.missing=0;
-      this.pending=null;
-      this.streak=0;
-    } else this.missing++;
-    return {person,state};
-  }
-}
-
 function mediaEvent(video,{success,signal,timeout=4500,message,action}) {
   return new Promise((resolve,reject)=>{
     signal.throwIfAborted();
@@ -131,12 +54,12 @@ export async function openDecoder(url,signal) {
 }
 export function closeDecoder(video) { video.pause();video.removeAttribute('src');video.load(); }
 
-export async function analyze({url,sourceVideo,anchor,end,lookForBall,signal,progress,onRetry}) {
+export async function analyze({url,sourceVideo,anchor,start=anchor.time,end,lookForBall,signal,progress,onRetry}) {
   signal.throwIfAborted();
   const video=sourceVideo||await openDecoder(url,signal);
   try {
     return await withPoseFallback(
-      detector=>scanPose(video,detector,{anchor,end,lookForBall,signal,progress}),
+      detector=>scanPose(video,detector,{anchor,start,end,lookForBall,signal,progress}),
       {signal,compatible:appleMobile(),onRetry},
     );
   } finally {
@@ -144,71 +67,109 @@ export async function analyze({url,sourceVideo,anchor,end,lookForBall,signal,pro
   }
 }
 
-async function scanPose(video,detector,{anchor,end,lookForBall,signal,progress}) {
+async function scanPose(video,detector,{anchor,start,end,lookForBall,signal,progress}) {
   let ball=null,ballUnavailable=lookForBall&&!detector.ballSupported,ballAttempted=ballUnavailable;
   const image=document.createElement('canvas');
   const scale=Math.min(1,640/Math.max(video.videoWidth,video.videoHeight));
   image.width=Math.max(1,Math.round(video.videoWidth*scale));
   image.height=Math.max(1,Math.round(video.videoHeight*scale));
   const ctx=image.getContext('2d',{willReadFrequently:true});
+  const zoomed=document.createElement('canvas');
+  zoomed.width=zoomed.height=480;
+  const zoomContext=zoomed.getContext('2d');
   const trace=document.createElement('canvas');
   const traceScale=112/Math.max(image.width,image.height);
   trace.width=Math.max(2,Math.round(image.width*traceScale));
   trace.height=Math.max(2,Math.round(image.height*traceScale));
   const traceContext=trace.getContext('2d',{willReadFrequently:true});
   const frames=[], cues=[], ballSamples=[];
-  const stop=Math.min(end,video.duration-.001,anchor.time+180);
-  let lock, last, fast=0, nearby=0,lastBall=-10,lastFast=-10;
+  const begin=Math.max(0,start,anchor.time-165);
+  const stop=Math.min(end,video.duration-.001,begin+180);
+  const forward=[],backward=[];
+  for(let time=anchor.time;time<=stop+.0001;time+=.125)forward.push(time);
+  for(let time=anchor.time-.125;time>=begin-.0001;time-=.125)backward.push(Math.max(0,time));
+  const times=[...forward,...backward];
+  let lock,origin,last,fast=0,nearby=0,lastBall=-10,lastFast=-10;
   let poseOutline=false;
+  const read=async ({crop=null,preferred})=>{
+    let people=[];
+    if(crop)zoomContext.drawImage(video,crop.x,crop.y,crop.side,crop.side,0,0,zoomed.width,zoomed.height);
+    const onResult=result=>{
+      people=result.landmarks.flatMap((raw,index)=>{
+        const points=crop?raw.map(point=>uncropPoint(point,crop)):raw;
+        const sig=playerSignature(points,ctx);
+        return sig?[{points,world:result.worldLandmarks[index],index,sig}]:[];
+      });
+      const candidate=preferred(people),mask=candidate&&result.segmentationMasks?.[candidate.index];
+      if(!mask)return;
+      try {
+        const values=mask.hasUint8Array()?mask.getAsUint8Array():mask.getAsFloat32Array();
+        const loops=maskContours(values,mask.width,mask.height);
+        candidate.outline=crop?loops.map(loop=>loop.map(([x,y])=>{
+          const point=uncropPoint({x,y},crop);return [point.x,point.y];
+        })):loops;
+      } catch { /* The visible joints can still be used to draw an outline. */ }
+    };
+    try {await detector.read(crop?zoomed:image,onResult);}
+    catch {throw new PoseEngineError('The pose model stopped while reading a frame.');}
+    signal.throwIfAborted();
+    return people;
+  };
   try {
-    for(let i=0, time=anchor.time;time<=stop+.0001;i++,time=anchor.time+i/8) {
+    for(const [i,time] of times.entries()) {
+      const reverse=i>=forward.length;
+      if(reverse&&i===forward.length) {
+        if(!origin)break;
+        lock=new PlayerLock(origin,lock.references);
+        last=null;
+      }
       signal.throwIfAborted();
       await seekFrame(video,time,signal);ctx.drawImage(video,0,0,image.width,image.height);
-      let chosen,state,people=[],outline=[];
-      const onResult=result=>{
-        people=result.landmarks.map((points,index)=>({points,world:result.worldLandmarks[index],index,sig:signature(points,ctx)}))
-          .filter(person=>person.sig);
-        if(!lock) {
-          const sorted=people.map(person=>{
-            const valid=person.points.filter(p=>p&&Number.isFinite(p.x)&&Number.isFinite(p.y)&&(p.visibility??1)>=.30);
-            const xs=valid.map(p=>p.x), ys=valid.map(p=>p.y);
-            const margin=i===0?.045:.07;
-            const contains=anchor.x>=Math.min(...xs)-margin && anchor.x<=Math.max(...xs)+margin &&
-              anchor.y>=Math.min(...ys)-margin && anchor.y<=Math.max(...ys)+margin;
-            return {person,contains,distance:Math.hypot(person.sig.center.x-anchor.x,person.sig.center.y-anchor.y)};
-          }).filter(item=>item.contains).sort((a,b)=>a.distance-b.distance);
-          if(!sorted.length || (sorted.length>1 && sorted[1].distance-sorted[0].distance<.035))
-            return;
-          chosen=sorted[0].person;
-          lock=new PlayerLock(chosen.sig);
-          state='tracked';
-        } else {
-          ({person:chosen,state}=lock.match(people));
+      let chosen,state='lost';
+      const tapCandidates=people=>tappedPlayer(people,anchor,image.width,image.height,i===0?.014:.021);
+      const preferred=people=>lock?lock.rank(people)[0]?.person:tapCandidates(people);
+      let people=await read({preferred});
+      if(!lock&&!tapCandidates(people)) {
+        for(const zoom of [.64,.34,.18]) {
+          const crop=playerCrop(anchor,zoom,video.videoWidth,video.videoHeight);
+          people=mergePlayers(people,await read({crop,preferred}));
+          if(tapCandidates(people))break;
         }
-        const mask=chosen&&result.segmentationMasks?.[chosen.index];
-        if(mask) {
-          try {
-            const values=mask.hasUint8Array()?mask.getAsUint8Array():mask.getAsFloat32Array();
-            outline=maskContours(values,mask.width,mask.height);
-          } catch {
-            // Leave the pose visible if the device cannot read the mask.
+      } else if(lock) {
+        const [best,second]=lock.rank(people);
+        const near=Math.max(.018,Math.min(.11,lock.last.torso*2));
+        const needsZoom=!best||best.colour>.32||best.spatial>near||(second&&second.score-best.score<.08);
+        if(needsZoom&&(lock.missing<5||lock.pending||i%4===0)) {
+          const target=lock.pending||lock.last;
+          const side=Math.min(video.videoWidth,video.videoHeight);
+          const zoom=Math.min(.82,Math.max(.18,target.torso*image.height/Math.min(image.width,image.height)*5));
+          if(side>=160) {
+            const crop=playerCrop(target.center,zoom,video.videoWidth,video.videoHeight);
+            people=mergePlayers(people,await read({crop,preferred}));
           }
         }
-      };
-      try {await detector.read(image,onResult);}
-      catch {throw new PoseEngineError('The pose model stopped while reading a frame.');}
-      signal.throwIfAborted();
+      }
+      if(lock)({person:chosen,state}=lock.match(people));
+      else {
+        chosen=tapCandidates(people);
+        if(chosen) {
+          origin=chosen.sig;
+          lock=new PlayerLock(origin);
+          state='tracked';
+        }
+      }
+      let outline=chosen?.outline||[];
       if(chosen&&!outline.length&&traceContext) {
         outline=poseContours(chosen.points,traceContext);
         poseOutline ||= outline.length>0;
       }
-      if(!lock&&i>=6)throw new Error('No clear person matched your tap. Pause where you are closer and fully visible, then tap your chest again.');
+      if(!lock&&i>=4)throw new PlayerSelectionError();
       if(!chosen) {
         fast=nearby=0;
         frames.push({time,points:null,world:null,state});
       } else {
         frames.push({time,points:chosen.points,world:chosen.world,outline,state});
-        if(last && state==='tracked') {
+        if(!reverse && last && state==='tracked') {
           const s=chosen.sig, motion=Math.hypot(s.hip.x-last.hip.x,s.hip.y-last.hip.y)/s.torso;
           fast=motion>.21 ? fast+1 : 0;
           if(fast===3 && time-lastFast>2) {
@@ -219,7 +180,7 @@ async function scanPose(video,detector,{anchor,end,lookForBall,signal,progress})
         }
         last=chosen.sig;
       }
-      if(lookForBall&&!ballAttempted&&chosen) {
+      if(!reverse&&lookForBall&&!ballAttempted&&chosen) {
         ballAttempted=true;
         try {ball=await objectModel('ball',signal);}
         catch {signal.throwIfAborted();ballUnavailable=true;}
@@ -252,17 +213,24 @@ async function scanPose(video,detector,{anchor,end,lookForBall,signal,progress})
         }
         ballSamples.push({time,ball:center,nearYou,receiver,score:center?balls[0].score:0});
         nearby=nearYou?nearby+1:0;
-        if(nearby===2&&time-lastBall>2) {
+        if(!reverse&&nearby===2&&time-lastBall>2) {
           lastBall=time;
           cues.push({time,title:'Ball proximity candidate',category:'Other',
             feedback:'The detected ball stayed near a visible ankle. Review the clip to confirm the touch.'});
         }
       }
-      if(i%4===0) {progress((time-anchor.time)/Math.max(.125,stop-anchor.time));await new Promise(r=>setTimeout(r,0));}
+      if(i%4===0) {progress((i+1)/times.length);await new Promise(r=>setTimeout(r,0));}
     }
   } finally {if(ball)closeModel(ball);}
-  if(!lock)throw new Error('No clear player was detected. Try a brighter, closer shot with your shoulders and hips visible.');
-  return {frames,cues,ballSamples,ballUnavailable,poseOutline,compatibility:detector.compatibility};
+  if(!origin)throw new PlayerSelectionError();
+  const sorted=frames.sort((a,b)=>a.time-b.time);
+  for(let i=0;i<sorted.length;i++) {
+    const sample=sorted[i];
+    if(sample.time>=anchor.time-.001||!sample.points)continue;
+    sample.state=i>0&&!sorted[i-1].points?'reacquired':'tracked';
+  }
+  progress(1);
+  return {frames:sorted,cues,ballSamples:ballSamples.sort((a,b)=>a.time-b.time),ballUnavailable,poseOutline,compatibility:detector.compatibility};
 }
 
 function angle(a,b,c) {
