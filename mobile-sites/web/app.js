@@ -5,14 +5,15 @@ import {teamWorkspace} from './team-ui.js';
 import {analyze,attemptReview,coachReview,drawMovementMap,metrics,render3d,skeleton} from './pose.js';
 import {exportClip} from './export.js';
 import {outcomeRate,planFor,skills} from './training.js';
-import {calibratePitch,drawPitchMap,eventKinds,eventTotals,footLocations,goalArea,suggestBallEvents,tacticalPriorities,tacticalZones} from './match.js';
+import {calibratePitch,drawPitchMap,estimateId,eventKinds,eventTotals,footLocations,goalArea,suggestBallEvents,tacticalPriorities,tacticalZones,unreviewedEstimates} from './match.js';
 
 const $ = id => document.getElementById(id);
 const video = $('video'), reference = $('reference'), canvas = $('drawing');
 const categories = ['Running form','Acceleration','Deceleration','Change of direction','First touch','Pass','Shot','Defensive action','Pressing','Transition','Set piece','Opponent pattern','Other'];
 const tools = {Line: 2, Arrow: 2, Angle: 3};
-let source, sourceUrl, refUrl, report = null, marks = {}, tags = [];
+let source, sourceUrl, refUrl, exportPreviewUrl, report = null, marks = {}, tags = [];
 let weekly=[],outcomes=[],currentPlan=null,activeTeam=null,team=null;
+let dismissedEstimates=[];
 let pitch=[],pendingPitch=null,events=[],matchSamples=[],goalPoints=[],pendingGoal=null,ballSamples=[];
 let anchor, selecting=false, pose=null, coaching=null, markedMoment=null, scanJob=null, scanFailure=null, scanMessage='', exportJob=null, recording=null, voiceDraft='';
 const hasChanges=()=>tags.length || Object.values(marks).some(items=>items.length) || voiceDraft || report || pitch.length || events.length || team?.hasWork();
@@ -41,6 +42,7 @@ function loadSource(file, replace=true) {
   if (replace && !allowReplace()) return false;
   scanGeneration++;scanJob?.abort(); exportJob?.abort(); stopVoice(true);
   ready = false;scanFailure=null;scanMessage='';
+  clearExportPreview();
   team?.reset();
   $('controls').disabled = $('tags').disabled = true;
   for (const id of ['saveLibrary','exportClip','scanPose','choosePlayer']) $(id).disabled=true;
@@ -52,7 +54,7 @@ function loadSource(file, replace=true) {
   canvas.hidden = false;
   $('empty').hidden = true;
   tags = []; marks = {}; report = null; pending = []; first = 0; last = 0;
-  pitch=[];pendingPitch=null;events=[];matchSamples=[];goalPoints=[];pendingGoal=null;ballSamples=[];
+  pitch=[];pendingPitch=null;events=[];dismissedEstimates=[];matchSamples=[];goalPoints=[];pendingGoal=null;ballSamples=[];
   $('attackDirection').value='right';$('eventForm').reset();$('markEventTime').hidden=true;renderMatch();
   anchor=null;selecting=false;reconnecting=false;previousPose=null;pose=null;coaching=null;markedMoment=null;renderCoaching();$('candidates').replaceChildren();updateCanvasMode();updateTargetControls();
   $('trackBadge').hidden=true;
@@ -302,7 +304,7 @@ function download(blob,name) {
 }
 function reviewData() {
   return {version:1,source:source.name,fps:fps(),frame_count:frameCount(),tags,drawings:marks,movement_review:report,
-    personal:savePoseReview(pose,$('coachMode').value,markedMoment,$('kickSide').value),training:{weekly,outcomes},match:{pitch,events,samples:matchSamples,goalPoints,ballSamples,attack:$('attackDirection').value,team:team?.snapshot()}};
+    personal:savePoseReview(pose,$('coachMode').value,markedMoment,$('kickSide').value),training:{weekly,outcomes},match:{pitch,events,dismissedEstimates,samples:matchSamples,goalPoints,ballSamples,attack:$('attackDirection').value,team:team?.snapshot()}};
 }
 $('json').onclick = () => {
   const data = reviewData();
@@ -596,6 +598,28 @@ function addCandidateButtons(cues) {
 }
 updatePosePanel();
 
+function clearExportPreview() {
+  const exported=$('exportedVideo');
+  exported.pause();
+  exported.removeAttribute('src');
+  if(exportPreviewUrl)URL.revokeObjectURL(exportPreviewUrl);
+  exportPreviewUrl=null;
+  $('exportPreview').hidden=true;
+}
+function previewExport(blob) {
+  clearExportPreview();
+  const exported=$('exportedVideo');
+  exported.onloadedmetadata=()=>{
+    if(exportPreviewUrl)status('exportCheck',`This browser opened the exported clip · ${exported.duration.toFixed(2)} s. Tap Play to check it.`);
+  };
+  exported.onerror=()=>{
+    if(exportPreviewUrl)status('exportCheck','This browser could not preview the export. The download is still available.');
+  };
+  status('exportCheck','Checking that this browser can open the export…');
+  $('exportPreview').hidden=false;
+  exportPreviewUrl=URL.createObjectURL(blob);
+  exported.src=exportPreviewUrl;
+}
 $('cancelExport').onclick=()=>exportJob?.abort();
 $('exportClip').onclick=async()=>{
   if(!ready||exportJob)return;
@@ -620,10 +644,10 @@ $('exportClip').onclick=async()=>{
       const Context=window.AudioContext||window.webkitAudioContext;
       if(!Context) throw new Error('This browser cannot include audio. Turn off both audio options to export video only.');
       audioContext=new Context();
-      await audioContext.resume();
-      if(audioContext.state!=='running') throw new Error('Audio is unavailable. Try again or turn off Include original audio.');
+      await Promise.race([audioContext.resume().catch(()=>{}),new Promise(resolve=>setTimeout(resolve,1500))]);
     }
-    const result=await exportClip({url:sourceUrl,start,end,audioContext,includeOriginal,voiceNotes,signal:job.signal,
+    const result=await exportClip({url:sourceUrl,sourceFile:clip,start,end,audioContext,includeOriginal,voiceNotes,signal:job.signal,
+      onFallback:()=>status('videoStatus','Using the MP4 compatibility encoder…'),
       progress:value=>{$('exportProgress').value=value;},
       draw(surface,decoder,time){
         const ctx=surface.getContext('2d'),rect={x:0,y:0,w:surface.width,h:surface.height};
@@ -633,6 +657,7 @@ $('exportClip').onclick=async()=>{
       }});
     if(!job.signal.aborted && source===clip) {
       download(result.blob,`football-clip.${result.extension}`);
+      previewExport(result.blob);
       const audio=[result.audio?'source audio':'',result.narration?`${result.narration} voice note(s)`:''].filter(Boolean);
       status('videoStatus',`Exported annotated ${result.extension.toUpperCase()}${audio.length?' with '+audio.join(' and '):' without audio'}.`+
         (result.skipped?` ${result.skipped} voice note(s) could not be decoded.`:''));
@@ -1024,6 +1049,8 @@ $('eventForm').onsubmit=event=>{
 };
 function restoreMatch(data) {
   pitch=calibratePitch(data?.pitch)?data.pitch:[];
+  dismissedEstimates=Array.isArray(data?.dismissedEstimates)?data.dismissedEstimates.filter(id=>
+    typeof id==='string'&&/^(pass|shot):\d+$/.test(id)).slice(0,250):[];
   goalPoints=goalArea(data?.goalPoints)?data.goalPoints:[];
   $('attackDirection').value=data?.attack==='left'?'left':'right';
   ballSamples=Array.isArray(data?.ballSamples)?data.ballSamples.filter(sample=>sample&&
@@ -1046,7 +1073,7 @@ function renderMatch() {
   $('startPitch').disabled=$('captureEvent').disabled=$('saveEvent').disabled=$('markGoal').disabled=!ready;
   renderTactics(mapper);
   renderSuggestions();
-  $('exportEvents').disabled=!events.length;
+  $('exportEvents').disabled=!events.length&&!currentEstimates().length;
   $('startPitch').textContent=pendingPitch?'Cancel calibration':mapper?'Recalibrate pitch':'Mark pitch corners';
   status('pitchHelp',mapper?mapped?`${mapped} ankle samples projected onto the calibrated pitch. Use a fixed camera.`:
     'Corners saved. Track yourself to map your visible movement.':
@@ -1071,8 +1098,10 @@ function renderMatch() {
   }
 }
 $('exportEvents').onclick=()=>{
-  const rows=[['time_s','action','outcome','note'],...events.map(item=>
-    [item.time,eventKinds[item.kind].label,item.outcome,item.note])];
+  const rows=[['time_s','action','outcome','source','note'],
+    ...events.map(item=>[item.time,eventKinds[item.kind].label,item.outcome,'Confirmed',item.note]),
+    ...currentEstimates().map(item=>[item.time,eventKinds[item.kind].label,
+      item.kind==='shot'?'Projected goal-area entry':'Estimated completion','Automatic estimate',item.note])];
   download(new Blob([rows.map(row=>row.map(csv).join(',')).join('\r\n')],{type:'text/csv'}),'football-match-events.csv');
 };
 renderMatch();
@@ -1132,13 +1161,41 @@ function renderTactics(mapper) {
     element('li',`Channels · left ${pct('left')}% · centre ${pct('centre')}% · right ${pct('right')}%`));
   zones.append(element('li','Compare this distribution with your assigned role. Percentages use visible, calibrated samples only.'));
 }
+function currentEstimates() {
+  return unreviewedEstimates(suggestBallEvents(ballSamples,goalPoints),events,dismissedEstimates);
+}
+function renderAutomatic() {
+  const found=currentEstimates(), list=$('autoMatches');
+  list.replaceChildren();
+  const passes=found.filter(item=>item.kind==='pass').length, shots=found.length-passes;
+  status('autoSummary',found.length?
+    `${passes} estimated completed pass(es) · ${shots} projected goal-area entr${shots===1?'y':'ies'}`:
+    'No unreviewed estimates meet the automatic evidence threshold.');
+  for(const item of found) {
+    const row=element('li','');
+    row.append(element('strong',`${item.time.toFixed(2)} s · ${item.kind==='shot'?'Projected goal-area entry':'Estimated completed pass'}`),
+      element('p',item.note));
+    const actions=element('div','');actions.className='row';
+    actions.append(button('Replay',()=>{video.pause();seek(Math.max(0,item.time-.4));$('footage').scrollIntoView();}),
+      button('Review outcome',()=>{
+        $('eventKind').value=item.kind;eventOptions();$('eventOutcome').value=item.outcome;
+        $('eventTime').value=item.time.toFixed(3);$('eventNote').value='';
+        $('eventForm').scrollIntoView({block:'center'});
+      }),button('Dismiss estimate',()=>{
+        dismissedEstimates.push(estimateId(item));renderMatch();
+      }));
+    row.append(actions);list.append(row);
+  }
+}
 function renderSuggestions() {
   const list=$('suggestedEvents');list.replaceChildren();
+  renderAutomatic();
   $('markGoal').textContent=pendingGoal?'Cancel goal marking':goalPoints.length?'Re-mark goal area':'Mark goal area';
   status('goalStatus',goalPoints.length?'Goal area marked. Shot cues refer to this region of the picture.':
     'For shot candidates, mark opposite corners of the goal mouth in a fixed-camera clip.');
   if(!ballSamples.length) {status('suggestedHelp','Enable ball proximity before you run tracking to find pass and shot candidates.');return;}
-  const found=suggestBallEvents(ballSamples,goalPoints);
+  const found=suggestBallEvents(ballSamples,goalPoints).filter(item=>!item.automatic&&
+    !events.some(record=>record.kind===item.kind&&Math.abs(record.time-item.time)<=.7));
   status('suggestedHelp',found.length?'Check candidate events on replay before adding them to your match stats.':
     'No qualifying ball transfer or goal-area event was found. Small or obstructed balls can be missed.');
   for(const event of found) {

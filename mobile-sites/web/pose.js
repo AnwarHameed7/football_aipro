@@ -281,9 +281,11 @@ export async function analyze({url,sourceVideo,anchor,end,lookForBall,signal,pro
         let receiver=null;
         if(receivers.length===1 || (receivers.length>1 && receivers[1].range-receivers[0].range>.25)) {
           const person=receivers[0].person;
-          receiver={...person.sig.hip,team:kitDistance(lock.seed,person.sig)<.28?'similar':'unknown'};
+          const kit=kitDistance(lock.seed,person.sig);
+          receiver={...person.sig.hip,team:kit<.28?'similar':'unknown',
+            clear:kit<.18&&receivers[0].range<.48&&state!=='checking'};
         }
-        ballSamples.push({time,ball:center,nearYou,receiver});
+        ballSamples.push({time,ball:center,nearYou,receiver,score:center?balls[0].score:0});
         nearby=nearYou?nearby+1:0;
         if(nearby===2&&time-lastBall>2) {
           lastBall=time;

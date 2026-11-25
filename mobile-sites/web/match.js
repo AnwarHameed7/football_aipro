@@ -106,22 +106,28 @@ export function goalArea(points) {
 
 export function suggestBallEvents(samples,goalPoints) {
   const goal=goalArea(goalPoints), findings=[];
-  let near=0, departure=null, receiver=null, goalHits=0, missing=0;
-  const reset=()=>{near=0;departure=null;receiver=null;goalHits=0;missing=0;};
+  let near=0, nearStrong=0, departure=null, receiver=null, goalHits=0, insideStrong=0, missing=0;
+  const reset=()=>{near=0;nearStrong=0;departure=null;receiver=null;goalHits=0;insideStrong=0;missing=0;};
   let previous=-Infinity;
   for(const sample of samples) {
     if(sample.time-previous>.35)reset();
     previous=sample.time;
-    if(departure && sample.time-departure.time>1.8)reset();
-    if(!sample.ball){near=0;receiver=null;goalHits=0;if(++missing>=2)reset();continue;}
-    missing=0;
-    if(sample.nearYou) {
-      near++;
-      departure=null;receiver=null;goalHits=0;
+    if(departure&&sample.time-departure.time>2)reset();
+    if(!sample.ball) {
+      near=nearStrong=0;receiver=null;goalHits=insideStrong=0;
+      if(departure)departure.clean=false;
+      if(++missing>=2)reset();
       continue;
     }
-    if(near>=2) departure={time:sample.time,ball:sample.ball};
-    near=0;
+    missing=0;
+    const strong=(sample.score||0)>=.62;
+    if(sample.nearYou) {
+      near++;nearStrong=strong?nearStrong+1:0;
+      departure=null;receiver=null;goalHits=insideStrong=0;
+      continue;
+    }
+    if(near>=2)departure={time:sample.time,ball:sample.ball,strong:nearStrong>=2&&strong,clean:true};
+    near=nearStrong=0;
     if(!departure)continue;
     const travel=Math.hypot(sample.ball[0]-departure.ball[0],sample.ball[1]-departure.ball[1]);
     const [x,y]=sample.ball;
@@ -129,26 +135,40 @@ export function suggestBallEvents(samples,goalPoints) {
     const outsideAtStart=goal&&(departure.ball[0]<goal.left||departure.ball[0]>goal.right||
       departure.ball[1]<goal.top||departure.ball[1]>goal.bottom);
     goalHits=inGoal&&outsideAtStart&&travel>.035?goalHits+1:0;
-    if(goalHits>=2) {
-      findings.push({kind:'shot',outcome:'On target',time:departure.time,
-        note:'The detected ball entered the marked goal area in two samples. Check its depth and the result on replay.'});
+    insideStrong=goalHits&&strong?insideStrong+1:0;
+    const next=sample.receiver;
+    const consistent=next&&receiver&&next.team===receiver.team&&Math.hypot(next.x-receiver.x,next.y-receiver.y)<.075;
+    receiver=next&&travel>=.05?{...next,count:consistent?receiver.count+1:1,
+      reliable:strong&&next.clear?(consistent?receiver.reliable+1:1):0}:null;
+    if(goalHits>=3||(goalHits>=2&&(!departure.strong||sample.time-departure.time>=1.65))) {
+      const automatic=departure.strong&&departure.clean&&insideStrong>=3;
+      findings.push({kind:'shot',outcome:'On target',time:departure.time,automatic,
+        note:automatic?'Strong ball track into the marked goal area. This is a camera-view estimate of what reached that area.':
+          'The detected ball entered the marked goal area. Check its depth and the result on replay.'});
       reset();continue;
     }
-    const next=sample.receiver;
-    if(!next||travel<.05) {receiver=null;continue;}
-    const consistent=receiver&&next.team===receiver.team&&Math.hypot(next.x-receiver.x,next.y-receiver.y)<.10;
-    receiver={...next,count:consistent?receiver.count+1:1};
-    if(receiver.count>=2) {
-      findings.push({kind:'pass',outcome:next.team==='similar'?'Completed':'Unclear',time:departure.time,
-        note:next.team==='similar'
-          ?'The ball moved from you to another player with similar kit and stayed near their feet. Check team and control on replay.'
-          :'The ball moved from you to another player. Check kit, intended recipient, and control on replay.'});
+    if(inGoal)continue;
+    if(receiver&&(receiver.count>=3||(receiver.count>=2&&(!departure.strong||sample.time-departure.time>=1.65)))) {
+      const automatic=departure.strong&&departure.clean&&receiver.team==='similar'&&receiver.reliable>=3&&travel>.065;
+      findings.push({kind:'pass',outcome:receiver.team==='similar'?'Completed':'Unclear',time:departure.time,automatic,
+        note:automatic?'The ball moved from you to a player with closely matching kit and stayed at their feet across three samples.':
+          receiver.team==='similar'?'The ball moved toward a player with similar kit. Check team and control on replay.':
+            'The ball moved from you to another player. Check the intended recipient and outcome on replay.'});
       reset();
     }
   }
+  if(departure&&goalHits>=2)findings.push({kind:'shot',outcome:'On target',time:departure.time,automatic:false,
+    note:'The clip ends with the ball in the marked goal area. Review the depth and outcome.'});
+  else if(departure&&receiver?.count>=2)findings.push({kind:'pass',outcome:receiver.team==='similar'?'Completed':'Unclear',
+    time:departure.time,automatic:false,note:'The clip ends before the receiver could be tracked for three samples.'});
   return findings;
 }
 
+export const estimateId=event=>`${event.kind}:${Math.round(event.time*10)}`;
+export function unreviewedEstimates(suggestions,confirmed,dismissed) {
+  return suggestions.filter(event=>event.automatic&&!dismissed.includes(estimateId(event))&&
+    !confirmed.some(review=>review.kind===event.kind&&Math.abs(review.time-event.time)<=.7));
+}
 export function tacticalZones(samples, project, attack) {
   if(!project) return null;
   const counts={defensive:0,middle:0,attacking:0,left:0,centre:0,right:0};

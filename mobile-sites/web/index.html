@@ -62,6 +62,10 @@
       </fieldset>
       <div class="row"><button id="exportClip" type="button" disabled>Export annotated clip</button><label><input id="exportAudio" type="checkbox" checked>Include original audio</label><label><input id="exportVoice" type="checkbox">Mix coach voice notes</label><button id="cancelExport" type="button" hidden>Cancel export</button></div>
       <progress id="exportProgress" hidden aria-label="Export progress"></progress>
+      <details id="exportPreview" hidden><summary>Preview exported clip</summary>
+        <video id="exportedVideo" controls playsinline preload="metadata" aria-label="Exported clip preview"></video>
+        <p id="exportCheck" class="meta" role="status"></p>
+      </details>
       <p class="meta" id="videoStatus" role="status" aria-live="polite">Clips are opened locally in this browser.</p>
     </section>
     <section id="clipsPanel" class="panel notes" aria-label="Clip tags and feedback">
@@ -140,6 +144,9 @@
     <p class="meta" id="goalStatus">For shot candidates, mark opposite corners of the visible goal mouth in a fixed-camera clip.</p>
     <h3>Positioning</h3><ul id="tacticalZones"></ul>
     <h3>Tactical coaching</h3><ul id="tacticalCues"></ul>
+    <h3>Automatic match estimates</h3>
+    <p class="meta">Stronger tracks appear here automatically. Review or dismiss any estimate. Verified outcomes have separate totals.</p>
+    <p id="autoSummary" class="meta" role="status"></p><ul id="autoMatches"></ul>
     <h3>Suggested events</h3><p id="suggestedHelp" class="meta">Enable ball proximity before you run tracking to find pass and shot candidates.</p><ul id="suggestedEvents"></ul>
     <h3>Confirmed events</h3>
     <p class="meta">Log what you can confirm on replay. Unclear events are excluded from success rates.</p>

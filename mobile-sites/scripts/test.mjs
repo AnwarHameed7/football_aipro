@@ -1,11 +1,11 @@
 import assert from 'node:assert/strict';
 import {PlayerLock, coachReview, seekFrame} from '../web/pose.js';
-import {calibratePitch, eventTotals, suggestBallEvents, tacticalZones} from '../web/match.js';
+import {calibratePitch, estimateId, eventTotals, suggestBallEvents, tacticalZones, unreviewedEstimates} from '../web/match.js';
 import {outcomeRate, planFor} from '../web/training.js';
 import worker from '../dist/server/index.js';
 import {sampleAt,reconnectTrack,skillMoments} from '../web/review-flow.js';
 import {ballControl,formationOverview} from '../web/team-tactics.js';
-import {clipNarrationWindow} from '../web/export.js';
+import {clipNarrationWindow,mixPcmTracks} from '../web/export.js';
 import {openPoseReview,savePoseReview} from '../web/saved-pose.js';
 import {activeCoachingCue,drawBodyOutline,maskContours} from '../web/highlight.js';
 import {assignTrackIds,classifyKit,correctTeam,detectionTiles,kitHistogram,teamShape,teamTimeline} from '../web/team.js';
@@ -169,6 +169,33 @@ assert.equal(control.links[0].to,2);
 assert.equal(control.events[1].kind,'turnover');
 assert.ok(control.seconds.unknown>=.65);
 assert.deepEqual(ballControl([{time:0,players:controlPlayers,ball:null},{time:1,players:controlPlayers,ball:null}]).events,[]);
+
+const strong=(time,x,nearYou=false,receiver=null)=>({...ball(time,x,nearYou,receiver),score:.9});
+const strongPeer={...peer,clear:true};
+const strongStart=[strong(1,.20,true),strong(1.25,.21,true),strong(1.5,.28)];
+const automatic=suggestBallEvents([...strongStart,strong(1.75,.51,false,strongPeer),
+  strong(2,.52,false,strongPeer),strong(2.25,.53,false,strongPeer)],[]);
+assert.equal(automatic[0].automatic,true);
+assert.equal(unreviewedEstimates(automatic,[],[]).length,1);
+assert.equal(unreviewedEstimates(automatic,[{kind:'pass',time:1.8}],[]).length,0);
+assert.equal(unreviewedEstimates(automatic,[],[estimateId(automatic[0])]).length,0);
+const weak=suggestBallEvents([...strongStart,strong(1.75,.51,false,peer),strong(2,.52,false,peer)],[]);
+assert.equal(weak[0].automatic,false);
+const trackedShot=suggestBallEvents([...strongStart,strong(1.75,.82),strong(2,.83),strong(2.25,.84)],[[.78,.4],[.90,.6]]);
+assert.equal(trackedShot[0].kind,'shot');
+assert.equal(trackedShot[0].automatic,true);
+const afterGap=suggestBallEvents([...strongStart,{time:1.75,ball:null},
+  strong(2,.82),strong(2.25,.83),strong(2.5,.84)],[[.78,.4],[.90,.6]]);
+assert.equal(afterGap.some(item=>item.automatic),false);
+const buffer=(...samples)=>({length:samples.length,numberOfChannels:1,getChannelData:()=>Float32Array.from(samples)});
+const mix=mixPcmTracks(4,1,[
+  {buffer:buffer(.0,.5,.5,.0),delay:0,offset:0,duration:1,gain:1},
+  {buffer:buffer(1,1,1,1),delay:.25,offset:.25,duration:.5,gain:.75},
+]);
+assert.deepEqual([...mix.left],[0,1,1,0]);
+assert.deepEqual([...mix.right],[...mix.left]);
+assert.deepEqual([...mixPcmTracks(4,1,[{buffer:buffer(.5,.25,.125),delay:.5,offset:.25,duration:.5,gain:1}]).left],
+  [0,0,.25,.125]);
 
 const host='https://fixture.test';
 const api=(path,options={},env={})=>worker.fetch(new Request(host+path,options),env);
