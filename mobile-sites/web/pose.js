@@ -1,52 +1,11 @@
-import {maskContours} from './highlight.js';
-
-const PACKAGE='@mediapipe/tasks-vision@0.10.22-rc.20250304';
-const MODEL_MIRRORS=[`https://cdn.jsdelivr.net/npm/${PACKAGE}`,`https://unpkg.com/${PACKAGE}`];
-const MODELS='https://storage.googleapis.com/mediapipe-models';
+import {maskContours,poseContours} from './highlight.js';
+import {appleMobile,closeModel,objectModel,PoseEngineError,withPoseFallback} from './pose-engine.js';
 export const BONES = [[11,12],[11,13],[13,15],[12,14],[14,16],[11,23],[12,24],[23,24],
   [23,25],[25,27],[27,29],[29,31],[24,26],[26,28],[28,30],[30,32]];
-let runtime, posePromise, ballPromise, peoplePromise;
+let peoplePromise;
 const visible = point => point && (point.visibility ?? 1) >= .55;
-
-async function tasks() {
-  for(const endpoint of MODEL_MIRRORS) {
-    try {
-      const library=await import(`${endpoint}/vision_bundle.mjs`);
-      const files=await library.FilesetResolver.forVisionTasks(`${endpoint}/wasm`);
-      // FilesetResolver can return URLs without fetching them.
-      const probe=new AbortController();
-      const timer=setTimeout(()=>probe.abort(),7000);
-      let check;
-      try { check=await fetch(files.wasmBinaryPath,{method:'HEAD',signal:probe.signal}); }
-      finally { clearTimeout(timer); }
-      if(!check.ok)continue;
-      return {library,files};
-    } catch {
-      // A second CDN can work when a browser or network blocks the first.
-    }
-  }
-  throw new Error('Could not load the analysis engine. Refresh the page in Safari and try again on a stable connection.');
-}
-function model(kind) {
-  runtime ||= tasks().catch(error => { runtime = null; throw error; });
-  if (kind === 'pose') return posePromise ||= runtime.then(({library,files}) =>
-    library.PoseLandmarker.createFromOptions(files,{
-      baseOptions:{modelAssetPath:`${MODELS}/pose_landmarker/pose_landmarker_lite/float16/1/pose_landmarker_lite.task`},
-      runningMode:'IMAGE',numPoses:4,outputSegmentationMasks:false,minPoseDetectionConfidence:.55,minPosePresenceConfidence:.55
-    })).catch(error => { posePromise=null; throw error; });
-  if(kind==='people') return peoplePromise ||= runtime.then(({library,files}) =>
-    library.ObjectDetector.createFromOptions(files,{
-      baseOptions:{modelAssetPath:`${MODELS}/object_detector/efficientdet_lite0/float16/1/efficientdet_lite0.tflite`},
-      runningMode:'IMAGE',categoryAllowlist:['person','sports ball'],scoreThreshold:.35,maxResults:40
-    })).catch(error => {peoplePromise=null;throw error;});
-  return ballPromise ||= runtime.then(({library,files}) =>
-    library.ObjectDetector.createFromOptions(files,{
-      baseOptions:{modelAssetPath:`${MODELS}/object_detector/efficientdet_lite0/float16/1/efficientdet_lite0.tflite`},
-      runningMode:'IMAGE',categoryAllowlist:['sports ball'],scoreThreshold:.45
-    })).catch(error => { ballPromise=null; throw error; });
-}
-
-export const playerDetector=()=>model('people');
+export const playerDetector=()=>peoplePromise ||= objectModel('people')
+  .catch(error=>{peoplePromise=null;throw error;});
 
 function average(a,b) { return {x:(a.x+b.x)/2,y:(a.y+b.y)/2}; }
 function signature(points, context) {
@@ -59,7 +18,7 @@ function signature(points, context) {
   if (torso < .018) return null;
   const center=average(shoulder,hip);
   const width=context.canvas.width, height=context.canvas.height;
-  const halfX=Math.max(3,Math.min(.12,Math.max(Math.abs(points[11].x-points[12].x)*.28,torso*.19))*width);
+  const halfX=Math.max(3,Math.min(.12,Math.max((shoulders.length===2?Math.abs(shoulders[0].x-shoulders[1].x)*.28:0),torso*.19))*width);
   const halfY=Math.max(3,Math.min(.13,Math.abs(shoulder.y-hip.y)*.30)*height);
   const x=Math.max(0,Math.floor(center.x*width-halfX)), y=Math.max(0,Math.floor(center.y*height-halfY));
   const w=Math.min(width-x,Math.ceil(halfX*2)), h=Math.min(height-y,Math.ceil(halfY*2));
@@ -164,19 +123,6 @@ export async function seekFrame(video,time,signal) {
       message:'The video frame could not be decoded. Play the clip once, then pause and retry.'});
 }
 
-function waitForModel(promise,signal) {
-  return new Promise((resolve,reject)=>{
-    let timer;
-    const finish=(error,result)=>{
-      clearTimeout(timer);signal.removeEventListener('abort',cancel);
-      if(error)reject(error);else resolve(result);
-    };
-    const cancel=()=>finish(signal.reason);
-    signal.addEventListener('abort',cancel,{once:true});
-    timer=setTimeout(()=>finish(new Error('The pose model did not load. Check your connection and tap Track me again.')),45000);
-    promise.then(result=>finish(null,result),finish);
-  });
-}
 export async function openDecoder(url,signal) {
   const video=document.createElement('video');
   video.muted=true; video.playsInline=true; video.preload='auto';
@@ -185,26 +131,36 @@ export async function openDecoder(url,signal) {
 }
 export function closeDecoder(video) { video.pause();video.removeAttribute('src');video.load(); }
 
-export async function analyze({url,sourceVideo,anchor,end,lookForBall,signal,progress}) {
+export async function analyze({url,sourceVideo,anchor,end,lookForBall,signal,progress,onRetry}) {
   signal.throwIfAborted();
-  const detector=await waitForModel(model('pose'),signal);
-  signal.throwIfAborted();
-  let ball=null, ballUnavailable=false;
-  if(lookForBall) {
-    try { ball=await waitForModel(model('ball'),signal); } catch { signal.throwIfAborted();ballUnavailable=true; }
-  }
   const video=sourceVideo||await openDecoder(url,signal);
+  try {
+    return await withPoseFallback(
+      detector=>scanPose(video,detector,{anchor,end,lookForBall,signal,progress}),
+      {signal,compatible:appleMobile(),onRetry},
+    );
+  } finally {
+    if(!sourceVideo)closeDecoder(video);
+  }
+}
+
+async function scanPose(video,detector,{anchor,end,lookForBall,signal,progress}) {
+  let ball=null,ballUnavailable=lookForBall&&!detector.ballSupported,ballAttempted=ballUnavailable;
   const image=document.createElement('canvas');
   const scale=Math.min(1,640/Math.max(video.videoWidth,video.videoHeight));
   image.width=Math.max(1,Math.round(video.videoWidth*scale));
   image.height=Math.max(1,Math.round(video.videoHeight*scale));
   const ctx=image.getContext('2d',{willReadFrequently:true});
+  const trace=document.createElement('canvas');
+  const traceScale=112/Math.max(image.width,image.height);
+  trace.width=Math.max(2,Math.round(image.width*traceScale));
+  trace.height=Math.max(2,Math.round(image.height*traceScale));
+  const traceContext=trace.getContext('2d',{willReadFrequently:true});
   const frames=[], cues=[], ballSamples=[];
   const stop=Math.min(end,video.duration-.001,anchor.time+180);
-  let lock, last, fast=0, nearby=0,lastBall=-10,lastFast=-10,maskEnabled=true;
+  let lock, last, fast=0, nearby=0,lastBall=-10,lastFast=-10;
+  let poseOutline=false;
   try {
-    try {await waitForModel(detector.setOptions({outputSegmentationMasks:true}),signal);}
-    catch {signal.throwIfAborted();maskEnabled=false;await waitForModel(detector.setOptions({outputSegmentationMasks:false}),signal);}
     for(let i=0, time=anchor.time;time<=stop+.0001;i++,time=anchor.time+i/8) {
       signal.throwIfAborted();
       await seekFrame(video,time,signal);ctx.drawImage(video,0,0,image.width,image.height);
@@ -239,13 +195,12 @@ export async function analyze({url,sourceVideo,anchor,end,lookForBall,signal,pro
           }
         }
       };
-      try {
-        detector.detect(image,onResult);
-      } catch(error) {
-        if(!maskEnabled)throw error;
-        await waitForModel(detector.setOptions({outputSegmentationMasks:false}),signal);
-        maskEnabled=false;
-        detector.detect(image,onResult);
+      try {await detector.read(image,onResult);}
+      catch {throw new PoseEngineError('The pose model stopped while reading a frame.');}
+      signal.throwIfAborted();
+      if(chosen&&!outline.length&&traceContext) {
+        outline=poseContours(chosen.points,traceContext);
+        poseOutline ||= outline.length>0;
       }
       if(!lock&&i>=6)throw new Error('No clear person matched your tap. Pause where you are closer and fully visible, then tap your chest again.');
       if(!chosen) {
@@ -264,8 +219,18 @@ export async function analyze({url,sourceVideo,anchor,end,lookForBall,signal,pro
         }
         last=chosen.sig;
       }
-      if(ball && lock && i%2===0) {
-        const balls=ball.detect(image).detections.map(d=>({
+      if(lookForBall&&!ballAttempted&&chosen) {
+        ballAttempted=true;
+        try {ball=await objectModel('ball',signal);}
+        catch {signal.throwIfAborted();ballUnavailable=true;}
+      }
+      let detections;
+      if(ball&&lock&&i%2===0) {
+        try {detections=ball.detect(image).detections;}
+        catch {closeModel(ball);ball=null;ballUnavailable=true;}
+      }
+      if(detections) {
+        const balls=detections.map(d=>({
           center:[(d.boundingBox.originX+d.boundingBox.width/2)/image.width,
             (d.boundingBox.originY+d.boundingBox.height/2)/image.height],
           score:d.categories[0]?.score||0,
@@ -295,9 +260,9 @@ export async function analyze({url,sourceVideo,anchor,end,lookForBall,signal,pro
       }
       if(i%4===0) {progress((time-anchor.time)/Math.max(.125,stop-anchor.time));await new Promise(r=>setTimeout(r,0));}
     }
-  } finally { if(!sourceVideo)closeDecoder(video); }
+  } finally {if(ball)closeModel(ball);}
   if(!lock)throw new Error('No clear player was detected. Try a brighter, closer shot with your shoulders and hips visible.');
-  return {frames,cues,ballSamples,ballUnavailable};
+  return {frames,cues,ballSamples,ballUnavailable,poseOutline,compatibility:detector.compatibility};
 }
 
 function angle(a,b,c) {
@@ -307,11 +272,22 @@ function angle(a,b,c) {
   if(norm<1e-9) return null;
   return Math.round(Math.acos(Math.max(-1,Math.min(1,u.reduce((sum,x,i)=>sum+x*v[i],0)/norm)))*180/Math.PI);
 }
-export function metrics(sample) {
-  if(!sample?.world) return [];
-  const w=sample.world;
-  return [['Left knee',angle(w[23],w[25],w[27])],['Right knee',angle(w[24],w[26],w[28])],
-    ['Left elbow',angle(w[11],w[13],w[15])],['Right elbow',angle(w[12],w[14],w[16])]]
+function jointAngle(sample,indices,aspect,projected) {
+  if(projected) {
+    const points=indices.map(i=>sample.points?.[i]);
+    if(!points.every(visible))return null;
+    return angle(...points.map(p=>({...p,x:p.x*aspect,z:0})));
+  }
+  return angle(...indices.map(i=>sample.world?.[i]));
+}
+
+export function metrics(sample,aspect) {
+  if(!sample?.points&&!sample?.world)return [];
+  const projected=!sample.world;
+  if(projected&&!aspect)return [];
+  const types=[['Left knee',[23,25,27]],['Right knee',[24,26,28]],
+    ['Left elbow',[11,13,15]],['Right elbow',[12,14,16]]];
+  return types.map(([name,indices])=>[projected?name+' (2D)':name,jointAngle(sample,indices,aspect,projected)])
     .filter(([,value])=>value!==null);
 }
 
@@ -337,7 +313,7 @@ export function render3d(canvas,sample,angleDegrees) {
   for(let i=0;i<5;i++) {ctx.beginPath();ctx.moveTo(w*.11,h*(.66+i*.075));ctx.lineTo(w*.89,h*(.66+i*.075));ctx.stroke();}
   if(!sample?.world) {
     ctx.fillStyle='#c0d4cc';ctx.font='17px system-ui';ctx.textAlign='center';
-    ctx.fillText('No pose at this moment',w/2,h*.47);
+    ctx.fillText(sample?.points?'2D pose available':'No pose at this moment',w/2,h*.47);
     return;
   }
   const rad=angleDegrees*Math.PI/180;
@@ -377,17 +353,18 @@ export function coachReview(frames, aspect) {
   const median=items=>[...items].sort((a,b)=>a-b)[Math.floor(items.length/2)];
   for(const span of windows) {
     const trunks=[], knees=[], elbows=[];
-    for(const {points,world} of span) {
+    const projected=span.every(sample=>!sample.world);
+    for(const sample of span) {
+      const {points}=sample;
       if([11,12,23,24].every(i=>visible(points[i]))) {
         const shoulders=average(points[11],points[12]), hips=average(points[23],points[24]);
         const dx=(shoulders.x-hips.x)*aspect, dy=shoulders.y-hips.y;
         if(Math.hypot(dx,dy)>.035) trunks.push(Math.atan2(Math.abs(dx),Math.abs(dy))*180/Math.PI);
       }
-      if(!world) continue;
       for(const [output,left,right] of [
         [knees,[23,25,27],[24,26,28]],[elbows,[11,13,15],[12,14,16]],
       ]) {
-        const a=angle(...left.map(i=>world[i])), b=angle(...right.map(i=>world[i]));
+        const a=jointAngle(sample,left,aspect,projected),b=jointAngle(sample,right,aspect,projected);
         if(a!==null&&b!==null) output.push([a,b]);
       }
     }
@@ -406,7 +383,7 @@ export function coachReview(frames, aspect) {
       const delta=spread(0)-spread(1);
       if(Math.abs(delta)<26) continue;
       record(name,Math.abs(delta),span,
-        `Your estimated ${name} angle moved through a wider range on the ${delta>0?'left':'right'} in this segment.`,cue);
+        `Your estimated ${name} angle moved through a wider range on the ${delta>0?'left':'right'} in this segment${projected?' of the camera view':''}.`,cue);
     }
   }
   for(const key of ['trunk','knee','elbow']) if(best[key]) findings.push(best[key]);
@@ -433,22 +410,19 @@ export function attemptReview(frames, time, mode, side, aspect) {
       if(torso>.035) add(`At the marked contact, your ankles were about ${(separation/torso).toFixed(1)} torso lengths apart in the image.`,
         'Replay the approach and plant step. Check that the support foot lands in a repeatable spot relative to the ball.');
     }
-    const first=before.world && angle(before.world[hip],before.world[knee],before.world[foot]);
-    const hit=contact.world && angle(contact.world[hip],contact.world[knee],contact.world[foot]);
-    const follow=after.world && angle(after.world[hip],after.world[knee],after.world[foot]);
+    const flat=![before,contact,after].every(sample=>sample.world);
+    const [first,hit,follow]=[before,contact,after].map(sample=>jointAngle(sample,[hip,knee,foot],aspect,flat));
     if([first,hit,follow].every(Number.isFinite)) add(
-      `Your estimated ${side} knee angle was ${first}° on approach, ${hit}° at marked contact, and ${follow}° in follow-through.`,
+      `Your estimated ${side} knee angle was ${first}° on approach, ${hit}° at marked contact, and ${follow}° in follow-through${flat?' in the camera view':''}.`,
       mode==='pass'?'Compare your plant step and whether your follow-through points toward the target.':
         mode==='cross'?'Use the same approach and compare your plant step before sending the ball into a marked target zone.':
         'Compare two kicks from the same camera angle. Check whether your swing continues through the ball and you land in balance.');
   } else if(mode==='landing') {
-    const kneeAngles=sample=>sample.world&&[
-      angle(sample.world[23],sample.world[25],sample.world[27]),
-      angle(sample.world[24],sample.world[26],sample.world[28]),
-    ];
+    const flat=!(contact.world&&after.world);
+    const kneeAngles=sample=>[[23,25,27],[24,26,28]].map(indices=>jointAngle(sample,indices,aspect,flat));
     const a=kneeAngles(contact),b=kneeAngles(after);
     if(a&&b&&[...a,...b].every(Number.isFinite))
-      add(`Estimated knee angles at landing were ${a[0]}° left and ${a[1]}° right, changing to ${b[0]}° and ${b[1]}° after landing.`,
+      add(`Estimated knee angles at landing were ${a[0]}° left and ${a[1]}° right, changing to ${b[0]}° and ${b[1]}° after landing${flat?' in the camera view':''}.`,
         'Replay the following steps and check whether you can hold the finish comfortably on repeated low jumps.');
   } else {
     const center=item=>{

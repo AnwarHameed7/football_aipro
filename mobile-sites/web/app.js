@@ -466,7 +466,7 @@ function poseAt(time) { return sampleAt(pose?.frames,time); }
 function updatePosePanel() {
   const sample=poseAt(video.currentTime);
   render3d($('model3d'),sample,Number($('rotation').value));
-  const angles=metrics(sample);
+  const angles=metrics(sample,video.videoWidth/video.videoHeight);
   status('measurements',angles.length
     ? angles.map(([label,value])=>`${label} ${value}°`).join(' · ')+' · Estimated from one camera'
     : pose?'No confident measurements at this timestamp.':'Measurements appear after analysis.');
@@ -516,7 +516,11 @@ $('scanPose').onclick=async()=>{
     scanMessage='Loading the pose model. The first scan may take longer.';
     status('poseStatus',scanMessage);updateLiveCoach(null);
     const result=await analyze({url:sourceUrl,sourceVideo:video,anchor,end:last>first && last/fps()>anchor.time ? (last+1)/fps() : video.duration,
-      lookForBall:$('ballCues').checked,signal:job.signal,progress:value=>{
+      lookForBall:$('ballCues').checked,signal:job.signal,onRetry:()=>{
+        $('poseProgress').removeAttribute('value');$('liveProgress').removeAttribute('value');
+        scanMessage='Restarting with a more compatible pose model…';
+        status('poseStatus',scanMessage);updateLiveCoach(null);
+      },progress:value=>{
         $('poseProgress').value=$('liveProgress').value=Math.max(0,Math.min(1,value));
         scanMessage=`Analyzing selected player · ${Math.round(value*100)}%`;
         status('poseStatus',scanMessage);updateLiveCoach(null);
@@ -532,7 +536,8 @@ $('scanPose').onclick=async()=>{
     status('selectionHelp',returns?`Play for coach feedback. Found you again ${returns} time(s); use Next re-entry to review.`:
       'Track ready. Play the clip to see feedback under the video.');
     status('poseStatus',`${matched} of ${result.frames.length} samples matched. Ambiguous frames were left as gaps.`+
-      (result.ballUnavailable?' The ball model could not load.':''));
+      (result.poseOutline?' Outline estimated from visible joints.':'')+
+      (result.ballUnavailable?' Ball tracking was unavailable for this scan.':''));
     const firstVisible=result.frames.find(frame=>frame.points);
     renderReport();seek(firstVisible?.time??anchor.time);paint();updatePosePanel();
   } catch(error) {
@@ -1316,7 +1321,7 @@ function updateLiveCoach(sample) {
   } else if(!coaching && $('coachMode').value!=='running') {
     observation='Mark the contact or movement you want reviewed to get feedback here.';
   } else {
-    const measurement=metrics(sample).slice(0,2);
+    const measurement=metrics(sample,video.videoWidth/video.videoHeight).slice(0,2);
     observation=measurement.length?measurement.map(([name,value])=>`${name} ${value}°`).join(' · '):
       'Tracking you here. No coaching observation for this moment.';
     if(measurement.length)label='Current pose estimates';

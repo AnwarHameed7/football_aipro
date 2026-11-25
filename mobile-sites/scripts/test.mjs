@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
-import {PlayerLock, coachReview, seekFrame} from '../web/pose.js';
+import {PlayerLock, attemptReview, coachReview, metrics, seekFrame} from '../web/pose.js';
+import {PoseEngineError, modelWithin, withPoseFallback} from '../web/pose-engine.js';
 import {calibratePitch, estimateId, eventTotals, suggestBallEvents, tacticalZones, unreviewedEstimates} from '../web/match.js';
 import {outcomeRate, planFor} from '../web/training.js';
 import worker from '../dist/server/index.js';
@@ -9,6 +10,33 @@ import {clipNarrationWindow,mixPcmTracks} from '../web/export.js';
 import {openPoseReview,savePoseReview} from '../web/saved-pose.js';
 import {activeCoachingCue,drawBodyOutline,maskContours} from '../web/highlight.js';
 import {assignTrackIds,classifyKit,correctTeam,detectionTiles,kitHistogram,teamShape,teamTimeline} from '../web/team.js';
+
+const modes=[],closed=[];
+const engineRun=await withPoseFallback(async engine=>{
+  if(engine.mode==='simple')throw new PoseEngineError('Aborted(). Build with -sASSERTIONS for more info.');
+  return 'tracked';
+},{
+  compatible:true,signal:new AbortController().signal,onRetry:()=>modes.push('retry'),
+  open:async mode=>{modes.push(mode);return {mode,close:()=>closed.push(mode)};},
+});
+assert.equal(engineRun,'tracked');
+assert.deepEqual(modes,['simple','retry','cpu']);
+assert.deepEqual(closed,['simple','cpu']);
+const engineCancelled=new AbortController();
+let settle, late;
+const pendingModel=new Promise(resolve=>{settle=resolve;});
+const waiting=modelWithin(pendingModel,engineCancelled.signal,1000,resource=>{late=resource;});
+engineCancelled.abort();
+await assert.rejects(waiting,{name:'AbortError'});
+settle('released');
+await pendingModel;
+assert.equal(late,'released');
+let engineOpens=0;
+await assert.rejects(withPoseFallback(async()=>{throw new Error('Video stopped seeking.');},{
+  compatible:false,signal:new AbortController().signal,
+  open:async()=>{engineOpens++;return {close(){}};},
+}),/Video stopped seeking/);
+assert.equal(engineOpens,1);
 
 function kit(bin,x) {
   const bins=new Float32Array(64);
@@ -28,6 +56,12 @@ points[24]=points[23];
 const frames=Array.from({length:16},(_,i)=>({time:i/8,points,world:null}));
 assert.equal(planFor('running',coachReview(frames,1.8).findings).items[0].key,'trunk');
 assert.equal(coachReview(frames.slice(0,6),1.8).findings.length,0);
+points[25]={x:.39,y:.63,z:0,visibility:1};
+points[26]={x:.41,y:.65,z:0,visibility:1};
+points[27]={x:.37,y:.78,z:0,visibility:1};
+points[28]={x:.47,y:.77,z:0,visibility:1};
+assert.ok(metrics(frames[0],1.8).some(([name])=>name==='Left knee (2D)'));
+assert.match(attemptReview(frames,.5,'landing','right',1.8).findings[0].observation,/in the camera view/);
 assert.equal(outcomeRate(10,7),70);
 assert.equal(outcomeRate(3,4),null);
 

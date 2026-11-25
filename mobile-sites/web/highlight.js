@@ -75,3 +75,44 @@ export function activeCoachingCue(findings,time,sample) {
   if(!sample?.points||!Array.isArray(findings))return null;
   return findings.find(item=>time>=item.start&&time<item.end)||null;
 }
+
+// Trace a rounded silhouette from visible joints when pixel segmentation is unavailable.
+export function poseContours(points,ctx) {
+  const w=ctx.canvas.width,h=ctx.canvas.height;
+  const point=i=>{
+    const p=points[i];
+    return p&&(p.visibility??1)>=.40&&Number.isFinite(p.x)&&Number.isFinite(p.y)
+      ?[p.x*w,p.y*h]:null;
+  };
+  const shoulders=[point(11),point(12)].filter(Boolean),hips=[point(23),point(24)].filter(Boolean);
+  if(!shoulders.length||!hips.length)return [];
+  const center=list=>list.reduce(([x,y],[a,b])=>[x+a/list.length,y+b/list.length],[0,0]);
+  const top=center(shoulders),bottom=center(hips);
+  const torso=Math.hypot(top[0]-bottom[0],top[1]-bottom[1]);
+  const radius=Math.max(1.3,torso*.15);
+  ctx.clearRect(0,0,w,h);
+  ctx.fillStyle=ctx.strokeStyle='#fff';
+  ctx.lineCap=ctx.lineJoin='round';
+  const stroke=(a,b,size)=>{
+    if(!a||!b)return;
+    ctx.beginPath();ctx.moveTo(...a);ctx.lineTo(...b);ctx.lineWidth=size;ctx.stroke();
+  };
+  if(shoulders.length===2&&hips.length===2) {
+    ctx.beginPath();ctx.moveTo(...shoulders[0]);ctx.lineTo(...shoulders[1]);
+    ctx.lineTo(...hips[1]);ctx.lineTo(...hips[0]);ctx.closePath();ctx.lineWidth=radius;ctx.fill();ctx.stroke();
+  }
+  stroke(top,bottom,radius*2.8);
+  const head=[point(0),point(7),point(8)].filter(Boolean);
+  if(head.length) {
+    const p=center(head);
+    stroke(top,p,radius*1.1);
+    ctx.beginPath();ctx.ellipse(p[0],p[1],radius*1.05,radius*1.35,0,0,2*Math.PI);ctx.fill();
+  }
+  for(const [a,b,size] of [
+    [11,13,.85],[13,15,.72],[12,14,.85],[14,16,.72],[23,25,1.5],[25,27,1.05],
+    [24,26,1.5],[26,28,1.05],[27,31,.85],[28,32,.85],
+  ]) stroke(point(a),point(b),radius*size);
+  const rgba=ctx.getImageData(0,0,w,h).data;
+  const alpha=Uint8Array.from({length:w*h},(_,i)=>rgba[i*4+3]);
+  return maskContours(alpha,w,h);
+}
