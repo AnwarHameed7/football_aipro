@@ -3,6 +3,10 @@
 Professional AI-powered football performance analysis platform.
 Upload a video of a player or match, and the system automatically tracks players, analyses biomechanics, detects weaknesses, and generates corrective training recommendations.
 
+## Mobile app
+
+The ChatGPT Sites app source, build instructions, and tests are in [mobile-sites](mobile-sites/README.md).
+
 ## Personal coaching on desktop
 
 On Windows, install Python 3.12 and double-click **Start Football AI Pro.cmd** in the project folder. The launcher creates a local virtual environment and installs dependencies. You can also run the app from PowerShell:

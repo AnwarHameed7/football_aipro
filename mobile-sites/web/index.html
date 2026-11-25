@@ -1,0 +1,206 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#10191a">
+<meta name="description" content="Review football footage, compare technique, and share timestamped feedback.">
+<title>Football AI Pro · Video Review</title>
+<link rel="stylesheet" href="style.css">
+<script src="app.js" type="module"></script>
+</head>
+<body>
+<a href="#footage" class="skip">Skip to footage</a>
+<header><div class="brand"><span class="mark" aria-hidden="true"></span>Football AI Pro</div><nav aria-label="Workspace sections"><a href="#footage">Footage</a><a href="#technique">Technique</a><a href="#coachPanel">My coaching</a><a href="#clipsPanel">Clips</a><a href="#matchPanel">Match</a><a href="#squadPanel">Teams</a><a href="#libraryPanel">Library</a></nav></header>
+<main>
+  <div class="heading"><h1>Review footage</h1><p>Compare technique, mark key moments, and share feedback.</p></div>
+  <div class="workspace">
+    <section id="footage" class="panel video-panel" aria-label="Video workspace">
+      <div class="pane-header"><h2>Footage</h2><label class="button primary">Open clip<input id="source" type="file" accept="video/*"></label></div>
+      <div class="player-controls" aria-label="Select and track yourself">
+        <div class="row">
+          <button id="choosePlayer" class="primary" type="button" disabled aria-pressed="false">Select me</button>
+          <button id="trackMe" type="button" disabled>Track me</button>
+          <button id="markMoment" type="button" hidden disabled>Mark contact</button>
+          <button id="markEventTime" type="button" hidden>Use current time</button>
+          <button id="jumpReturn" type="button" hidden>Next re-entry</button>
+        </div>
+        <p id="selectionHelp" class="meta">Open a clip and pause when your full body is visible.</p>
+      </div>
+      <div class="videos" id="videos">
+        <div>
+          <div class="screen" id="screen"><div class="empty" id="empty">Choose a match or training clip</div><video id="video" controls playsinline hidden></video><canvas id="drawing" hidden></canvas><span id="trackBadge" role="status" class="track-badge" hidden></span></div>
+          <p id="clock" class="meta">0:00.000</p>
+        </div>
+        <div id="comparison" hidden><video id="reference" controls playsinline muted></video><p class="meta" id="referenceName">Reference clip</p></div>
+      </div>
+      <section id="liveCoach" class="live-coach" aria-labelledby="liveCoachTitle">
+        <div class="pane-header"><h2 id="liveCoachTitle">AI Coach</h2><span id="coachPlaybackLabel" class="meta">Playback feedback</span></div>
+        <p id="liveObservation" role="status">Select yourself and tap Track me. Feedback appears here as you play the analyzed clip.</p>
+        <p id="liveCue" class="meta" hidden></p>
+        <div class="row"><button id="nextCoachCue" type="button" hidden>Watch next cue</button><a href="#coachPanel">Full coaching and drills</a></div>
+      </section>
+      <fieldset id="controls" disabled>
+        <div class="row">
+          <button id="back" type="button">− frame</button><button id="next" type="button">+ frame</button>
+          <label>Speed <select id="speed"><option value=".25">¼×</option><option value=".5">½×</option><option value="1" selected>1×</option><option value="1.5">1.5×</option></select></label>
+          <label>FPS <input id="fps" type="number" min="1" max="240" value="30" step=".01" aria-label="Source frames per second"></label>
+        </div>
+        <div class="row">
+          <label>Drawing <select id="tool"><option value="Pointer">Pointer</option><option>Line</option><option>Arrow</option><option>Angle</option></select></label>
+          <button id="undo" type="button">Undo drawing</button>
+          <button id="image" type="button">Save frame</button>
+        </div>
+        <div class="row">
+          <label class="button">Open reference<input id="referenceFile" type="file" accept="video/*"></label>
+          <label><input id="sync" type="checkbox" checked>Sync</label>
+          <button id="align" type="button" disabled>Align current frames</button>
+        </div>
+        <p class="meta">Set the source FPS for frame stepping and desktop review files. Angles are measured in the image plane.</p>
+      </fieldset>
+      <div class="row"><button id="exportClip" type="button" disabled>Export annotated clip</button><label><input id="exportAudio" type="checkbox" checked>Include original audio</label><button id="cancelExport" type="button" hidden>Cancel export</button></div>
+      <progress id="exportProgress" hidden aria-label="Export progress"></progress>
+      <p class="meta" id="videoStatus" role="status" aria-live="polite">Clips are opened locally in this browser.</p>
+    </section>
+    <section id="clipsPanel" class="panel notes" aria-label="Clip tags and feedback">
+      <div class="pane-header"><h2>Clip tags</h2><label class="button">Import review<input id="import" type="file" accept=".json,application/json"></label></div>
+      <fieldset id="tags" disabled>
+        <div class="row segment"><button id="in" type="button">Set in</button><button id="out" type="button">Set out</button><span id="range" class="meta">0.000–0.000 s</span><label><input id="loop" type="checkbox">Loop</label></div>
+        <form id="form">
+          <label>Title<input id="title" placeholder="e.g. First step into the press" maxlength="120"></label>
+          <div class="form-row"><label>Category<select id="category"></select></label><label>Player or team<input id="player" maxlength="100"></label></div>
+          <label>Feedback<textarea id="feedback" rows="3" maxlength="3000" placeholder="Observation or next action"></textarea></label>
+          <div class="row"><button class="primary" id="saveTag" type="submit">Add tag</button><button id="clearTag" type="button" hidden>Cancel edit</button></div>
+        </form>
+        <div class="voice row"><button id="voiceStart" type="button">Record voice note</button><button id="voiceStop" type="button" hidden>Stop recording</button><span id="voiceStatus" class="meta" role="status"></span></div>
+        <label class="filter">Filter tags<input id="filter" type="search" placeholder="Search clips and feedback"></label>
+        <ul id="clips"></ul>
+        <div class="row export"><button id="json" type="button">Download review</button><button id="csv" type="button">Export CSV</button></div>
+      </fieldset>
+      <p class="meta" id="reviewStatus" role="status" aria-live="polite">Download the review to keep your tags and drawings.</p>
+      <details id="analysis" hidden><summary>Imported movement analysis</summary><div id="spans"></div></details>
+    </section>
+  </div>
+  <section class="panel technique" id="technique">
+    <div class="pane-header"><h2>Technique analysis</h2></div>
+    <div class="row">
+      <button id="scanPose" class="primary" type="button" disabled>Run tracking</button>
+      <button id="stopPose" type="button" hidden>Stop analysis</button>
+      <label><input id="showOutline" type="checkbox" checked>Body outline</label>
+      <label><input id="showPose" type="checkbox">Skeleton</label>
+      <label><input id="ballCues" type="checkbox">Look for ball proximity</label>
+    </div>
+    <progress id="poseProgress" hidden aria-label="Pose analysis progress"></progress>
+    <p id="poseStatus" class="meta" role="status">Tracking runs on this device. Use Select me above the video to start.</p>
+    <div class="tech-grid">
+      <div class="model"><canvas id="model3d" width="480" height="360" aria-label="Rotatable estimated three-dimensional pose"></canvas>
+        <label>Rotate <input type="range" id="rotation" min="-180" max="180" value="15"></label></div>
+      <div><h3>Pose and movement cues</h3><p class="meta" id="measurements">Measurements appear after analysis.</p><ul id="candidates"></ul></div>
+    </div>
+  </section>
+  <section class="panel technique" id="coachPanel">
+    <div class="pane-header"><h2>My coaching</h2><button id="shareCoaching" type="button" disabled>Share review</button></div>
+    <div class="row">
+      <label>Review type <select id="coachMode"></select></label>
+      <label id="kickSideLabel" hidden>Kicking foot <select id="kickSide"><option value="right">Right</option><option value="left">Left</option></select></label>
+    </div>
+    <p class="meta" id="attemptHelp" hidden></p>
+    <p class="meta" id="coachSummary" role="status">Select yourself and tap Track me to get feedback on your movement.</p>
+    <div id="manualReview" hidden>
+      <label>What did you see? <select id="decisionResult"><option value="late">My scan or movement was late</option><option value="closed">My movement didn’t open a passing lane</option><option value="early">I scanned and moved into space in time</option></select></label>
+    </div>
+    <ul id="coachFindings"></ul>
+    <section id="trainingPanel" class="training-panel" aria-labelledby="trainingTitle">
+      <h3 id="trainingTitle">My training plan</h3>
+      <p class="meta" id="trainingSummary">Your plan appears after a usable coaching observation.</p>
+      <ul id="trainingList"></ul>
+      <div class="row"><button id="saveFocus" disabled type="button">Add to weekly plan</button><button id="sharePlan" disabled type="button">Share plan</button></div>
+      <ul id="weeklyPlan"></ul>
+    </section>
+    <details id="outcomePanel">
+      <summary>Log practice results</summary>
+      <p class="meta">Enter results you counted in the video or on the pitch.</p>
+      <form id="outcomeForm">
+        <div class="form-row"><label>Attempts<input id="attemptCount" type="number" min="1" max="500" required></label>
+        <label><span id="successLabel">Successful attempts</span><input id="successCount" type="number" min="0" max="500" required></label></div>
+        <button id="saveOutcome" type="submit" disabled>Log result</button>
+      </form>
+      <p class="meta" id="outcomeStatus" role="status"></p><ul id="outcomes"></ul>
+    </details>
+    <details><summary>My movement map</summary><canvas id="movementMap" width="640" height="360" aria-label="Tracked locations in the video frame"></canvas><p class="meta">Shows where you appeared in the video frame. Camera movement affects this map.</p></details>
+  </section>
+  <section class="panel technique" id="matchPanel">
+    <div class="pane-header"><h2>My match review</h2><button id="startPitch" type="button" disabled>Mark pitch corners</button></div>
+    <p id="pitchHelp" class="meta" role="status">For a fixed wide-angle clip, mark four visible pitch corners to map your positions onto the field.</p>
+    <canvas id="pitchMap" width="640" height="390" aria-label="Map of tracked positions on the calibrated pitch"></canvas>
+    <div class="row"><label>Attack direction <select id="attackDirection"><option value="right">Left to right</option><option value="left">Right to left</option></select></label><button id="markGoal" type="button" disabled>Mark goal area</button></div>
+    <p class="meta" id="goalStatus">For shot candidates, mark opposite corners of the visible goal mouth in a fixed-camera clip.</p>
+    <h3>Positioning</h3><ul id="tacticalZones"></ul>
+    <h3>Tactical coaching</h3><ul id="tacticalCues"></ul>
+    <h3>Suggested events</h3><p id="suggestedHelp" class="meta">Enable ball proximity before you run tracking to find pass and shot candidates.</p><ul id="suggestedEvents"></ul>
+    <h3>Confirmed events</h3>
+    <p class="meta">Log what you can confirm on replay. Unclear events are excluded from success rates.</p>
+    <form id="eventForm">
+      <div class="form-row"><label>Action<select id="eventKind"></select></label><label>Outcome<select id="eventOutcome"></select></label></div>
+      <div class="form-row"><label>Time (seconds)<input id="eventTime" type="number" min="0" step=".001" required></label><label>What happened?<input id="eventNote" maxlength="250"></label></div>
+      <div class="row"><button id="captureEvent" type="button" disabled>Pick time from video</button><button class="primary" id="saveEvent" type="submit" disabled>Add event</button><button id="exportEvents" type="button" disabled>Export events CSV</button></div>
+    </form>
+    <p id="matchStatus" class="meta" role="status"></p><ul id="matchTotals"></ul><ul id="matchEvents"></ul>
+  </section>
+  <section class="panel technique" id="squadPanel">
+    <div class="pane-header"><h2>Team shape</h2><button id="squadPitch" type="button">Mark pitch corners</button></div>
+    <p id="squadHelp" class="meta" role="status">Open a fixed wide-angle video. Mark the four pitch corners and sample one shirt from each team.</p>
+    <div class="row">
+      <button id="squadA" type="button" disabled aria-pressed="false">Sample Team A shirt</button>
+      <button id="squadB" type="button" disabled aria-pressed="false">Sample Team B shirt</button>
+      <button id="squadRun" class="primary" type="button" disabled>Analyze both teams</button>
+      <button id="squadStop" type="button" hidden>Stop scan</button>
+    </div>
+    <div class="row">
+      <label><input id="squadWide" type="checkbox" checked>Look for distant players</label>
+      <label><input id="squadOverlay" type="checkbox" checked>Show teams over video</label>
+      <button id="squadCorrect" type="button" disabled aria-pressed="false">Correct player team</button>
+      <button id="squadResetKits" type="button" disabled>Reset shirt samples</button>
+      <button id="squadCsv" type="button" disabled>Export team shape CSV</button>
+    </div>
+    <div id="squadCorrection" class="row" hidden>
+      <span id="squadSelected" class="meta"></span><button id="assignA" type="button">Assign Team A</button>
+      <button id="assignB" type="button">Assign Team B</button><button id="assignUnknown" type="button">Mark unknown</button>
+    </div>
+    <p class="meta">Add up to three shirt samples per team, including a goalkeeper or alternate kit. Dashed marks are brief estimates behind obstructions.</p>
+    <p class="meta">Scans up to 90 seconds from the playhead or your in/out selection. The distant-player option takes longer.</p>
+    <progress id="squadProgress" max="1" aria-label="Team scan progress" hidden></progress>
+    <div class="tech-grid">
+      <div>
+        <canvas id="squadMap" width="640" height="390" aria-label="Position of detected players for both teams on the pitch"></canvas>
+        <label class="squad-timeline">Team timeline<input id="squadTime" type="range" min="0" max="1" step=".333333" disabled></label>
+        <p class="meta" id="squadTimestamp"></p>
+      </div>
+      <div><ul id="squadMetrics"></ul><h3>Moments to review</h3><ul id="squadMoments"></ul></div>
+    </div>
+  </section>
+  <section class="panel library" id="libraryPanel">
+    <div class="pane-header"><h2>Private review library</h2><button id="refreshLibrary" type="button">Refresh</button></div>
+    <p class="meta">Save a named review for another device. Include footage to reopen it directly, or keep the video on your device.</p>
+    <div class="row"><label>Review name <input id="libraryName" maxlength="100" placeholder="Training session"></label>
+    <label><input id="cloudVideo" type="checkbox">Include clip (up to 20 MB)</label>
+    <button id="saveLibrary" class="primary" type="button" disabled>Save to library</button></div>
+    <p class="meta" id="libraryStatus" role="status"></p><ul id="libraryItems"></ul>
+    <section id="teamReview" class="training-panel" hidden aria-labelledby="teamTitle">
+      <div class="pane-header"><h3 id="teamTitle">Team review</h3><button id="closeTeam" type="button">Close</button></div>
+      <form id="teamAccess" hidden>
+        <label>Collaborator’s ChatGPT email<input id="teamEmail" type="email" required maxlength="254"></label>
+        <label>Review role<select id="teamRole"><option value="coach">Coach · view and leave feedback</option><option value="viewer">Viewer · view only</option><option value="revoke">Remove review access</option></select></label>
+        <button type="submit">Save role</button>
+        <p class="meta">The collaborator also needs access to this private Site. Saving a review role does not send an invitation.</p>
+      </form>
+      <form id="teamFeedback" hidden>
+        <label>Video time (seconds)<input id="teamTime" type="number" min="0" max="86400" step=".001" value="0" required></label>
+        <label>Coaching feedback<textarea id="teamNote" required maxlength="850" rows="3"></textarea></label>
+        <button type="submit">Post feedback</button>
+      </form>
+      <p id="teamStatus" class="meta" role="status"></p><ul id="teamNotes"></ul>
+    </section>
+  </section>
+</main>
+</body></html>
