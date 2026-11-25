@@ -126,37 +126,9 @@ async function library(request, env, url) {
   return json({error:'Method not supported.'},405);
 }
 
-const mediaPipe='https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.22-rc.20250304';
-const googleModels='https://storage.googleapis.com/mediapipe-models';
-const analysisAssets={
-  '/vision_bundle.mjs':[`${mediaPipe}/vision_bundle.mjs`,'text/javascript; charset=utf-8'],
-  '/wasm/vision_wasm_internal.js':[`${mediaPipe}/wasm/vision_wasm_internal.js`,'text/javascript; charset=utf-8'],
-  '/wasm/vision_wasm_nosimd_internal.js':[`${mediaPipe}/wasm/vision_wasm_nosimd_internal.js`,'text/javascript; charset=utf-8'],
-  '/wasm/vision_wasm_internal.wasm':[`${mediaPipe}/wasm/vision_wasm_internal.wasm`,'application/wasm'],
-  '/wasm/vision_wasm_nosimd_internal.wasm':[`${mediaPipe}/wasm/vision_wasm_nosimd_internal.wasm`,'application/wasm'],
-  '/pose.task':[`${googleModels}/pose_landmarker/pose_landmarker_lite/float16/1/pose_landmarker_lite.task`,'application/octet-stream'],
-  '/detector.tflite':[`${googleModels}/object_detector/efficientdet_lite0/float16/1/efficientdet_lite0.tflite`,'application/octet-stream'],
-};
-
-async function modelAsset(request,path) {
-  const asset=Object.hasOwn(analysisAssets,path)?analysisAssets[path]:null;
-  if(!asset||!['GET','HEAD'].includes(request.method))return new Response('Not found',{status:404});
-  const [source,type]=asset;
-  try {
-    const upstream=await fetch(source,{method:request.method,redirect:'error',cf:{cacheEverything:true,cacheTtl:604800}});
-    if(!upstream.ok)return new Response('Model temporarily unavailable',{status:502});
-    return new Response(request.method==='HEAD'?null:upstream.body,{headers:{
-      'content-type':type,'cache-control':'private, max-age=604800','x-content-type-options':'nosniff',
-    }});
-  } catch {return new Response('Model temporarily unavailable',{status:502});}
-}
-
 export default {
   async fetch(request, env) {
     const url=new URL(request.url);
-    const modelPrefix='/analysis-assets/v1';
-    if(url.pathname.startsWith(modelPrefix+'/'))
-      return modelAsset(request,url.pathname.slice(modelPrefix.length));
     if(url.pathname.startsWith('/api/')) {
       try { return await library(request,env,url); }
       catch(error) {

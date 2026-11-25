@@ -160,20 +160,6 @@ assert.equal((await api('/api/reviews/'+id,{method:'DELETE',headers:{...headers,
 assert.equal((await api('/api/reviews/'+id,{method:'DELETE',headers:{...headers,origin:host}},{BUCKET})).status,204);
 assert.equal(files.size,0);
 assert.equal((await api('/match.js')).status,200);
-assert.equal((await api('/analysis-assets/v1/not-listed')).status,404);
-assert.equal((await api('/analysis-assets/v1/pose.task',{method:'POST'})).status,404);
-const originalFetch=globalThis.fetch;
-try {
-  globalThis.fetch=async (url,options)=>{
-    assert.equal(url,'https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_lite/float16/1/pose_landmarker_lite.task');
-    assert.equal(options.headers,undefined);
-    return new Response(new Uint8Array([4,3,2,1]));
-  };
-  const asset=await api('/analysis-assets/v1/pose.task',{headers:{'oai-authenticated-user-id':'test'}});
-  assert.equal(asset.status,200);
-  assert.equal(asset.headers.get('content-type'),'application/octet-stream');
-  assert.deepEqual([...new Uint8Array(await asset.arrayBuffer())],[4,3,2,1]);
-} finally {globalThis.fetch=originalFetch;}
 class SeekableVideo extends EventTarget {
   duration=5;readyState=2;seeking=false;position=0;
   get currentTime(){return this.position;}

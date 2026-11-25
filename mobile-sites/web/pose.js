@@ -1,35 +1,47 @@
 import {maskContours} from './highlight.js';
 
-const MODEL_ROUTE = '/analysis-assets/v1';
+const PACKAGE='@mediapipe/tasks-vision@0.10.22-rc.20250304';
+const MODEL_MIRRORS=[`https://cdn.jsdelivr.net/npm/${PACKAGE}`,`https://unpkg.com/${PACKAGE}`];
+const MODELS='https://storage.googleapis.com/mediapipe-models';
 export const BONES = [[11,12],[11,13],[13,15],[12,14],[14,16],[11,23],[12,24],[23,24],
   [23,25],[25,27],[27,29],[29,31],[24,26],[26,28],[28,30],[30,32]];
 let runtime, posePromise, ballPromise, peoplePromise;
 const visible = point => point && (point.visibility ?? 1) >= .55;
 
 async function tasks() {
-  try {
-    const library=await import(`${MODEL_ROUTE}/vision_bundle.mjs`);
-    const files=await library.FilesetResolver.forVisionTasks(`${MODEL_ROUTE}/wasm`);
-    return {library,files};
-  } catch {
-    throw new Error('Could not load the analysis engine. Refresh the page in Safari and try again on a stable connection.');
+  for(const endpoint of MODEL_MIRRORS) {
+    try {
+      const library=await import(`${endpoint}/vision_bundle.mjs`);
+      const files=await library.FilesetResolver.forVisionTasks(`${endpoint}/wasm`);
+      // FilesetResolver can return URLs without fetching them.
+      const probe=new AbortController();
+      const timer=setTimeout(()=>probe.abort(),7000);
+      let check;
+      try { check=await fetch(files.wasmBinaryPath,{method:'HEAD',signal:probe.signal}); }
+      finally { clearTimeout(timer); }
+      if(!check.ok)continue;
+      return {library,files};
+    } catch {
+      // A second CDN can work when a browser or network blocks the first.
+    }
   }
+  throw new Error('Could not load the analysis engine. Refresh the page in Safari and try again on a stable connection.');
 }
 function model(kind) {
   runtime ||= tasks().catch(error => { runtime = null; throw error; });
   if (kind === 'pose') return posePromise ||= runtime.then(({library,files}) =>
     library.PoseLandmarker.createFromOptions(files,{
-      baseOptions:{modelAssetPath:`${MODEL_ROUTE}/pose.task`},
+      baseOptions:{modelAssetPath:`${MODELS}/pose_landmarker/pose_landmarker_lite/float16/1/pose_landmarker_lite.task`},
       runningMode:'IMAGE',numPoses:4,outputSegmentationMasks:false,minPoseDetectionConfidence:.55,minPosePresenceConfidence:.55
     })).catch(error => { posePromise=null; throw error; });
   if(kind==='people') return peoplePromise ||= runtime.then(({library,files}) =>
     library.ObjectDetector.createFromOptions(files,{
-      baseOptions:{modelAssetPath:`${MODEL_ROUTE}/detector.tflite`},
+      baseOptions:{modelAssetPath:`${MODELS}/object_detector/efficientdet_lite0/float16/1/efficientdet_lite0.tflite`},
       runningMode:'IMAGE',categoryAllowlist:['person'],scoreThreshold:.35,maxResults:35
     })).catch(error => {peoplePromise=null;throw error;});
   return ballPromise ||= runtime.then(({library,files}) =>
     library.ObjectDetector.createFromOptions(files,{
-      baseOptions:{modelAssetPath:`${MODEL_ROUTE}/detector.tflite`},
+      baseOptions:{modelAssetPath:`${MODELS}/object_detector/efficientdet_lite0/float16/1/efficientdet_lite0.tflite`},
       runningMode:'IMAGE',categoryAllowlist:['sports ball'],scoreThreshold:.45
     })).catch(error => { ballPromise=null; throw error; });
 }
