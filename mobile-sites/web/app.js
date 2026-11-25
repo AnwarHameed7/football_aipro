@@ -12,7 +12,7 @@ const tools = {Line: 2, Arrow: 2, Angle: 3};
 let source, sourceUrl, refUrl, report = null, marks = {}, tags = [];
 let weekly=[],outcomes=[],currentPlan=null,activeTeam=null,team=null;
 let pitch=[],pendingPitch=null,events=[],matchSamples=[],goalPoints=[],pendingGoal=null,ballSamples=[];
-let anchor, selecting=false, pose=null, coaching=null, markedMoment=null, scanJob=null, exportJob=null, recording=null, voiceDraft='';
+let anchor, selecting=false, pose=null, coaching=null, markedMoment=null, scanJob=null, scanFailure=null, scanMessage='', exportJob=null, recording=null, voiceDraft='';
 const hasChanges=()=>tags.length || Object.values(marks).some(items=>items.length) || voiceDraft || report || pitch.length || events.length || team?.hasWork();
 const validAudio=value=>typeof value==='string' && value.length<=2_000_000 &&
   /^data:audio\/(webm|mp4|ogg|wav)(;codecs=[a-zA-Z0-9._,-]+)?;base64,[a-zA-Z0-9+/=]+$/.test(value);
@@ -37,7 +37,7 @@ const allowReplace=()=>!hasChanges() || confirm('Replace the current work in thi
 function loadSource(file, replace=true) {
   if (replace && !allowReplace()) return false;
   scanJob?.abort(); exportJob?.abort(); stopVoice(true);
-  ready = false;
+  ready = false;scanFailure=null;scanMessage='';
   team?.reset();
   $('controls').disabled = $('tags').disabled = true;
   for (const id of ['saveLibrary','exportClip','scanPose','choosePlayer']) $(id).disabled=true;
@@ -132,7 +132,7 @@ $('fps').onchange = () => {
   first = 0; last = 0; range(); paint();
 };
 function update(force = false) {
-  if (!ready) return;
+  if (!ready||scanJob) return;
   if (!video.paused && $('loop').checked && (frame() < first || video.currentTime >= (last + 1) / fps())) seek(first / fps());
   status('clock', `${Math.floor(video.currentTime / 60)}:${(video.currentTime % 60).toFixed(3).padStart(6, '0')} · frame ${frame() + 1}`);
   syncReference(force); paint(); updatePosePanel();
@@ -215,7 +215,7 @@ canvas.onpointerup = event => {
   if(pendingPitch) {markPitchPoint(x,y);return;}
   if(pendingGoal) {markGoalPoint(x,y);return;}
   if(selecting) {
-    anchor={x,y,time:video.currentTime};
+    anchor={x,y,time:video.currentTime};scanFailure=null;scanMessage='';
     pose=null;coaching=null;markedMoment=null;matchSamples=[];ballSamples=[];renderCoaching();renderMatch();
     $('candidates').replaceChildren();
     selecting=false; updateCanvasMode(); updateTargetControls();
@@ -457,26 +457,39 @@ $('model3d').onpointermove=event=>{
   updatePosePanel();
 };
 $('model3d').onpointerup=$('model3d').onpointercancel=()=>{drag=null;};
-$('stopPose').onclick=()=>scanJob?.abort();
+$('stopPose').onclick=$('stopTrackHere').onclick=()=>scanJob?.abort();
 $('scanPose').onclick=async()=>{
   if(!ready || scanJob) return;
   if(!anchor) {
     $('choosePlayer').click();
     return;
   }
-  video.pause();
-  const job=new AbortController(), clip=source;
-  scanJob=job;
+  const job=new AbortController(),clip=source;
+  scanJob=job;scanFailure=null;scanMessage='Opening the video frames…';
   $('scanPose').disabled=true;
-  updateTargetControls();paint();
-  $('stopPose').hidden=$('poseProgress').hidden=false;
-  $('poseProgress').removeAttribute('value');
-  status('poseStatus','Loading the pose model. The first scan takes longer.');
+  $('stopPose').hidden=$('stopTrackHere').hidden=$('poseProgress').hidden=$('liveProgress').hidden=false;
+  $('poseProgress').removeAttribute('value');$('liveProgress').removeAttribute('value');
+  updateTargetControls();paint();updateLiveCoach(null);
   try {
-    const result=await analyze({url:sourceUrl,anchor,end:last>first && last/fps()>anchor.time ? (last+1)/fps() : video.duration,
+    // Keep the seekable element the viewer already opened. iOS can defer decoding a second, unseen video.
+    if(video.readyState<2) {
+      const originalMuted=video.muted;
+      video.muted=true;
+      try {
+        await Promise.race([video.play(),new Promise((_,reject)=>setTimeout(
+          ()=>reject(new Error('Could not start decoding. Play the video once, pause, then tap Track me.')),5000))]);
+      } finally {
+        if(source===clip) {video.pause();video.muted=originalMuted;}
+      }
+    } else video.pause();
+    job.signal.throwIfAborted();
+    scanMessage='Loading the pose model. The first scan may take longer.';
+    status('poseStatus',scanMessage);updateLiveCoach(null);
+    const result=await analyze({url:sourceUrl,sourceVideo:video,anchor,end:last>first && last/fps()>anchor.time ? (last+1)/fps() : video.duration,
       lookForBall:$('ballCues').checked,signal:job.signal,progress:value=>{
-        $('poseProgress').value=Math.max(0,Math.min(1,value));
-        status('poseStatus',`Analyzing selected player · ${Math.round(value*100)}%`);
+        $('poseProgress').value=$('liveProgress').value=Math.max(0,Math.min(1,value));
+        scanMessage=`Analyzing selected player · ${Math.round(value*100)}%`;
+        status('poseStatus',scanMessage);updateLiveCoach(null);
       }});
     if(source!==clip || job.signal.aborted) return;
     pose=result;
@@ -489,13 +502,19 @@ $('scanPose').onclick=async()=>{
       'Track ready. Play the clip to see feedback under the video.');
     status('poseStatus',`${matched} of ${result.frames.length} samples matched. Ambiguous frames were left as gaps.`+
       (result.ballUnavailable?' The ball model could not load.':''));
-    renderReport();seek(anchor.time);paint();updatePosePanel();
+    const firstVisible=result.frames.find(frame=>frame.points);
+    renderReport();seek(firstVisible?.time??anchor.time);paint();updatePosePanel();
   } catch(error) {
-    if(source===clip) status('poseStatus',job.signal.aborted?'Analysis cancelled.':`Analysis could not finish. ${error.message}`);
+    if(source===clip) {
+      scanFailure=job.signal.aborted?'Tracking stopped. Tap Track me to retry.':
+        `Tracking could not finish. ${error?.message||'Try again with a short clip.'}`;
+      status('poseStatus',scanFailure);status('selectionHelp',scanFailure);
+      seek(anchor.time);
+    }
   } finally {
-    scanJob=null;$('scanPose').disabled=!ready;
-    updateTargetControls();paint();
-    $('stopPose').hidden=$('poseProgress').hidden=true;
+    scanJob=null;scanMessage='';$('scanPose').disabled=!ready;
+    $('stopPose').hidden=$('stopTrackHere').hidden=$('poseProgress').hidden=$('liveProgress').hidden=true;
+    updateTargetControls();paint();updateLiveCoach(poseAt(video.currentTime));
   }
 };
 function poseReport(result) {
@@ -1174,7 +1193,8 @@ function updateLiveCoach(sample) {
   const button=$('nextCoachCue');
   button.hidden=!findings.length||!!scanJob;
   let label='Playback feedback',observation,cue='';
-  if(scanJob) observation='Analyzing your movement. Play the clip when tracking finishes to see feedback here.';
+  if(scanJob) observation=scanMessage||'Analyzing your movement…';
+  else if(scanFailure) {label='Tracking needs attention';observation=scanFailure;}
   else if(!pose) observation='Select yourself and tap Track me. Feedback appears here as you play the analyzed clip.';
   else if(!sample) observation='This time is outside the analyzed part of the clip.';
   else if(!sample.points) observation='Your body is off-screen or the match is unclear. Feedback resumes when your track is found.';

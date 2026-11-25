@@ -21,6 +21,7 @@
         <div class="row">
           <button id="choosePlayer" class="primary" type="button" disabled aria-pressed="false">Select me</button>
           <button id="trackMe" type="button" disabled>Track me</button>
+          <button id="stopTrackHere" type="button" hidden>Stop tracking</button>
           <button id="markMoment" type="button" hidden disabled>Mark contact</button>
           <button id="markEventTime" type="button" hidden>Use current time</button>
           <button id="jumpReturn" type="button" hidden>Next re-entry</button>
@@ -37,7 +38,7 @@
       <section id="liveCoach" class="live-coach" aria-labelledby="liveCoachTitle">
         <div class="pane-header"><h2 id="liveCoachTitle">AI Coach</h2><span id="coachPlaybackLabel" class="meta">Playback feedback</span></div>
         <p id="liveObservation" role="status">Select yourself and tap Track me. Feedback appears here as you play the analyzed clip.</p>
-        <p id="liveCue" class="meta" hidden></p>
+        <p id="liveCue" class="meta" hidden></p><progress id="liveProgress" max="1" hidden aria-label="Personal tracking progress"></progress>
         <div class="row"><button id="nextCoachCue" type="button" hidden>Watch next cue</button><a href="#coachPanel">Full coaching and drills</a></div>
       </section>
       <fieldset id="controls" disabled>

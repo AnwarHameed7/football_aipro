@@ -1,33 +1,35 @@
 import {maskContours} from './highlight.js';
 
-const VERSION = '0.10.22-rc.20250304';
-const TASKS = `https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@${VERSION}`;
-const MODELS = 'https://storage.googleapis.com/mediapipe-models';
+const MODEL_ROUTE = '/analysis-assets/v1';
 export const BONES = [[11,12],[11,13],[13,15],[12,14],[14,16],[11,23],[12,24],[23,24],
   [23,25],[25,27],[27,29],[29,31],[24,26],[26,28],[28,30],[30,32]];
 let runtime, posePromise, ballPromise, peoplePromise;
 const visible = point => point && (point.visibility ?? 1) >= .55;
 
 async function tasks() {
-  const library = await import(`${TASKS}/vision_bundle.mjs`);
-  const files = await library.FilesetResolver.forVisionTasks(`${TASKS}/wasm`);
-  return {library, files};
+  try {
+    const library=await import(`${MODEL_ROUTE}/vision_bundle.mjs`);
+    const files=await library.FilesetResolver.forVisionTasks(`${MODEL_ROUTE}/wasm`);
+    return {library,files};
+  } catch {
+    throw new Error('Could not load the analysis engine. Refresh the page in Safari and try again on a stable connection.');
+  }
 }
 function model(kind) {
   runtime ||= tasks().catch(error => { runtime = null; throw error; });
   if (kind === 'pose') return posePromise ||= runtime.then(({library,files}) =>
     library.PoseLandmarker.createFromOptions(files,{
-      baseOptions:{modelAssetPath:`${MODELS}/pose_landmarker/pose_landmarker_lite/float16/1/pose_landmarker_lite.task`},
-      runningMode:'IMAGE',numPoses:4,outputSegmentationMasks:true,minPoseDetectionConfidence:.55,minPosePresenceConfidence:.55
+      baseOptions:{modelAssetPath:`${MODEL_ROUTE}/pose.task`},
+      runningMode:'IMAGE',numPoses:4,outputSegmentationMasks:false,minPoseDetectionConfidence:.55,minPosePresenceConfidence:.55
     })).catch(error => { posePromise=null; throw error; });
   if(kind==='people') return peoplePromise ||= runtime.then(({library,files}) =>
     library.ObjectDetector.createFromOptions(files,{
-      baseOptions:{modelAssetPath:`${MODELS}/object_detector/efficientdet_lite0/float16/1/efficientdet_lite0.tflite`},
+      baseOptions:{modelAssetPath:`${MODEL_ROUTE}/detector.tflite`},
       runningMode:'IMAGE',categoryAllowlist:['person'],scoreThreshold:.35,maxResults:35
     })).catch(error => {peoplePromise=null;throw error;});
   return ballPromise ||= runtime.then(({library,files}) =>
     library.ObjectDetector.createFromOptions(files,{
-      baseOptions:{modelAssetPath:`${MODELS}/object_detector/efficientdet_lite0/float16/1/efficientdet_lite0.tflite`},
+      baseOptions:{modelAssetPath:`${MODEL_ROUTE}/detector.tflite`},
       runningMode:'IMAGE',categoryAllowlist:['sports ball'],scoreThreshold:.45
     })).catch(error => { ballPromise=null; throw error; });
 }
@@ -36,8 +38,11 @@ export const playerDetector=()=>model('people');
 
 function average(a,b) { return {x:(a.x+b.x)/2,y:(a.y+b.y)/2}; }
 function signature(points, context) {
-  if (![11,12,23,24].every(i => visible(points[i]))) return null;
-  const shoulder=average(points[11],points[12]), hip=average(points[23],points[24]);
+  const torsoPoint=p=>p&&Number.isFinite(p.x)&&Number.isFinite(p.y)&&(p.visibility??1)>=.30;
+  const shoulders=[points[11],points[12]].filter(torsoPoint),hips=[points[23],points[24]].filter(torsoPoint);
+  if(!shoulders.length||!hips.length||shoulders.length+hips.length<3)return null;
+  const shoulder=shoulders.length===2?average(...shoulders):shoulders[0];
+  const hip=hips.length===2?average(...hips):hips[0];
   const torso=Math.hypot(shoulder.x-hip.x,shoulder.y-hip.y);
   if (torso < .018) return null;
   const center=average(shoulder,hip);
@@ -55,7 +60,7 @@ function signature(points, context) {
       (Math.min(3,Math.floor(4*g/(light+1)))<<2) | Math.min(3,Math.floor(4*b/(light+1)));
     bins[bin]+=1/(data.length/4);
   }
-  return {bins,hip,center,torso,shape:Math.abs(points[11].x-points[12].x)/torso};
+  return {bins,hip,center,torso,shape:shoulders.length===2?Math.abs(shoulders[0].x-shoulders[1].x)/torso:0};
 }
 function kitDistance(a,b) {
   let shared=0;
@@ -111,35 +116,53 @@ export class PlayerLock {
   }
 }
 
-function metadata(video,url,signal) {
+function mediaEvent(video,{success,signal,timeout=4500,message,action}) {
   return new Promise((resolve,reject)=>{
     signal.throwIfAborted();
+    let timer;
     const finish=error=>{
+      clearTimeout(timer);
+      video.removeEventListener(success,done);
+      video.removeEventListener('error',bad);
       signal.removeEventListener('abort',cancel);
-      video.onloadeddata=video.onerror=null;
-      if(error) reject(error); else resolve();
+      if(error)reject(error);else resolve();
+    };
+    const done=()=>finish(),bad=()=>finish(new Error(message)),cancel=()=>finish(signal.reason);
+    video.addEventListener(success,done,{once:true});
+    video.addEventListener('error',bad,{once:true});
+    signal.addEventListener('abort',cancel,{once:true});
+    timer=setTimeout(bad,timeout);
+    try {action?.();} catch(error) {finish(error);}
+  });
+}
+
+function metadata(video,url,signal) {
+  return mediaEvent(video,{success:'loadedmetadata',signal,timeout:8000,
+    message:'Could not open the video. Try an H.264 MP4 clip.',action:()=>{video.src=url;}});
+}
+export async function seekFrame(video,time,signal) {
+  signal.throwIfAborted();
+  const target=Math.min(Math.max(0,time),video.duration-.001);
+  if(Math.abs(video.currentTime-target)>=.002||video.seeking)
+    await mediaEvent(video,{success:'seeked',signal,
+      message:'The video stopped seeking. Try a shorter H.264 MP4 clip.',
+      action:()=>{video.currentTime=target;}});
+  if(video.readyState<2)
+    await mediaEvent(video,{success:'loadeddata',signal,
+      message:'The video frame could not be decoded. Play the clip once, then pause and retry.'});
+}
+
+function waitForModel(promise,signal) {
+  return new Promise((resolve,reject)=>{
+    let timer;
+    const finish=(error,result)=>{
+      clearTimeout(timer);signal.removeEventListener('abort',cancel);
+      if(error)reject(error);else resolve(result);
     };
     const cancel=()=>finish(signal.reason);
     signal.addEventListener('abort',cancel,{once:true});
-    video.onloadeddata=()=>finish(); video.onerror=()=>finish(new Error('Could not decode this clip.'));
-    video.src=url;
-  });
-}
-export function seekFrame(video,time,signal) {
-  signal.throwIfAborted();
-  const target=Math.min(Math.max(0,time),video.duration-.001);
-  if(Math.abs(video.currentTime-target)<.002 && !video.seeking) return Promise.resolve();
-  return new Promise((resolve,reject)=>{
-    const finish=error=>{
-      video.removeEventListener('seeked',done); video.removeEventListener('error',bad);
-      signal.removeEventListener('abort',cancel);
-      if(error) reject(error); else resolve();
-    };
-    const done=()=>finish(), bad=()=>finish(new Error('Could not seek in this clip.')),
-      cancel=()=>finish(signal.reason);
-    video.addEventListener('seeked',done,{once:true}); video.addEventListener('error',bad,{once:true});
-    signal.addEventListener('abort',cancel,{once:true});
-    video.currentTime=target;
+    timer=setTimeout(()=>finish(new Error('The pose model did not load. Check your connection and tap Track me again.')),45000);
+    promise.then(result=>finish(null,result),finish);
   });
 }
 export async function openDecoder(url,signal) {
@@ -150,13 +173,15 @@ export async function openDecoder(url,signal) {
 }
 export function closeDecoder(video) { video.pause();video.removeAttribute('src');video.load(); }
 
-export async function analyze({url,anchor,end,lookForBall,signal,progress}) {
-  const detector=await model('pose');
+export async function analyze({url,sourceVideo,anchor,end,lookForBall,signal,progress}) {
+  signal.throwIfAborted();
+  const detector=await waitForModel(model('pose'),signal);
+  signal.throwIfAborted();
   let ball=null, ballUnavailable=false;
   if(lookForBall) {
-    try { ball=await model('ball'); } catch { ballUnavailable=true; }
+    try { ball=await waitForModel(model('ball'),signal); } catch { signal.throwIfAborted();ballUnavailable=true; }
   }
-  const video=await openDecoder(url,signal);
+  const video=sourceVideo||await openDecoder(url,signal);
   const image=document.createElement('canvas');
   const scale=Math.min(1,640/Math.max(video.videoWidth,video.videoHeight));
   image.width=Math.max(1,Math.round(video.videoWidth*scale));
@@ -164,25 +189,28 @@ export async function analyze({url,anchor,end,lookForBall,signal,progress}) {
   const ctx=image.getContext('2d',{willReadFrequently:true});
   const frames=[], cues=[], ballSamples=[];
   const stop=Math.min(end,video.duration-.001,anchor.time+180);
-  let lock, last, fast=0, nearby=0,lastBall=-10,lastFast=-10;
+  let lock, last, fast=0, nearby=0,lastBall=-10,lastFast=-10,maskEnabled=true;
   try {
+    try {await waitForModel(detector.setOptions({outputSegmentationMasks:true}),signal);}
+    catch {signal.throwIfAborted();maskEnabled=false;await waitForModel(detector.setOptions({outputSegmentationMasks:false}),signal);}
     for(let i=0, time=anchor.time;time<=stop+.0001;i++,time=anchor.time+i/8) {
       signal.throwIfAborted();
       await seekFrame(video,time,signal);ctx.drawImage(video,0,0,image.width,image.height);
       let chosen,state,people=[],outline=[];
-      detector.detect(image,result=>{
+      const onResult=result=>{
         people=result.landmarks.map((points,index)=>({points,world:result.worldLandmarks[index],index,sig:signature(points,ctx)}))
           .filter(person=>person.sig);
         if(!lock) {
           const sorted=people.map(person=>{
-            const valid=person.points.filter(visible);
+            const valid=person.points.filter(p=>p&&Number.isFinite(p.x)&&Number.isFinite(p.y)&&(p.visibility??1)>=.30);
             const xs=valid.map(p=>p.x), ys=valid.map(p=>p.y);
-            const contains=anchor.x>=Math.min(...xs)-.045 && anchor.x<=Math.max(...xs)+.045 &&
-              anchor.y>=Math.min(...ys)-.045 && anchor.y<=Math.max(...ys)+.045;
+            const margin=i===0?.045:.07;
+            const contains=anchor.x>=Math.min(...xs)-margin && anchor.x<=Math.max(...xs)+margin &&
+              anchor.y>=Math.min(...ys)-margin && anchor.y<=Math.max(...ys)+margin;
             return {person,contains,distance:Math.hypot(person.sig.center.x-anchor.x,person.sig.center.y-anchor.y)};
           }).filter(item=>item.contains).sort((a,b)=>a.distance-b.distance);
           if(!sorted.length || (sorted.length>1 && sorted[1].distance-sorted[0].distance<.035))
-            throw new Error('The selected player is unclear. Tap the torso in a frame with more separation and the full body visible.');
+            return;
           chosen=sorted[0].person;
           lock=new PlayerLock(chosen.sig);
           state='tracked';
@@ -198,7 +226,16 @@ export async function analyze({url,anchor,end,lookForBall,signal,progress}) {
             // Leave the pose visible if the device cannot read the mask.
           }
         }
-      });
+      };
+      try {
+        detector.detect(image,onResult);
+      } catch(error) {
+        if(!maskEnabled)throw error;
+        await waitForModel(detector.setOptions({outputSegmentationMasks:false}),signal);
+        maskEnabled=false;
+        detector.detect(image,onResult);
+      }
+      if(!lock&&i>=6)throw new Error('No clear person matched your tap. Pause where you are closer and fully visible, then tap your chest again.');
       if(!chosen) {
         fast=nearby=0;
         frames.push({time,points:null,world:null,state});
@@ -215,7 +252,7 @@ export async function analyze({url,anchor,end,lookForBall,signal,progress}) {
         }
         last=chosen.sig;
       }
-      if(ball && i%2===0) {
+      if(ball && lock && i%2===0) {
         const balls=ball.detect(image).detections.map(d=>({
           center:[(d.boundingBox.originX+d.boundingBox.width/2)/image.width,
             (d.boundingBox.originY+d.boundingBox.height/2)/image.height],
@@ -244,7 +281,8 @@ export async function analyze({url,anchor,end,lookForBall,signal,progress}) {
       }
       if(i%4===0) {progress((time-anchor.time)/Math.max(.125,stop-anchor.time));await new Promise(r=>setTimeout(r,0));}
     }
-  } finally { closeDecoder(video); }
+  } finally { if(!sourceVideo)closeDecoder(video); }
+  if(!lock)throw new Error('No clear player was detected. Try a brighter, closer shot with your shoulders and hips visible.');
   return {frames,cues,ballSamples,ballUnavailable};
 }
 
@@ -307,11 +345,13 @@ export function render3d(canvas,sample,angleDegrees) {
 export function coachReview(frames, aspect) {
   const windows=[];
   let run=[];
+  const flush=()=>{if(run.length>=4)windows.push(run);run=[];};
   for(const sample of frames) {
-    if(!sample.points) {run=[];continue;}
+    if(!sample.points) {flush();continue;}
     run.push(sample);
-    if(run.length===16) {windows.push(run);run=[];}
+    if(run.length===16) flush();
   }
+  flush();
   const matched=frames.filter(sample=>sample.points).length;
   const findings=[];
   const best={};
@@ -336,7 +376,7 @@ export function coachReview(frames, aspect) {
         if(a!==null&&b!==null) output.push([a,b]);
       }
     }
-    if(trunks.length>=12 && median(trunks)>=27) {
+    if(trunks.length>=8 && median(trunks)>=27) {
       const lean=Math.round(median(trunks));
       record('trunk',lean,span,
         `Your trunk was tilted about ${lean}° from vertical in this camera view.`,

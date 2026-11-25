@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import {PlayerLock, coachReview} from '../web/pose.js';
+import {PlayerLock, coachReview, seekFrame} from '../web/pose.js';
 import {calibratePitch, eventTotals, suggestBallEvents, tacticalZones} from '../web/match.js';
 import {outcomeRate, planFor} from '../web/training.js';
 import worker from '../dist/server/index.js';
@@ -160,4 +160,31 @@ assert.equal((await api('/api/reviews/'+id,{method:'DELETE',headers:{...headers,
 assert.equal((await api('/api/reviews/'+id,{method:'DELETE',headers:{...headers,origin:host}},{BUCKET})).status,204);
 assert.equal(files.size,0);
 assert.equal((await api('/match.js')).status,200);
+assert.equal((await api('/analysis-assets/v1/not-listed')).status,404);
+assert.equal((await api('/analysis-assets/v1/pose.task',{method:'POST'})).status,404);
+const originalFetch=globalThis.fetch;
+try {
+  globalThis.fetch=async (url,options)=>{
+    assert.equal(url,'https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_lite/float16/1/pose_landmarker_lite.task');
+    assert.equal(options.headers,undefined);
+    return new Response(new Uint8Array([4,3,2,1]));
+  };
+  const asset=await api('/analysis-assets/v1/pose.task',{headers:{'oai-authenticated-user-id':'test'}});
+  assert.equal(asset.status,200);
+  assert.equal(asset.headers.get('content-type'),'application/octet-stream');
+  assert.deepEqual([...new Uint8Array(await asset.arrayBuffer())],[4,3,2,1]);
+} finally {globalThis.fetch=originalFetch;}
+class SeekableVideo extends EventTarget {
+  duration=5;readyState=2;seeking=false;position=0;
+  get currentTime(){return this.position;}
+  set currentTime(value){this.position=value;queueMicrotask(()=>this.dispatchEvent(new Event('seeked')));}
+}
+const decoder=new SeekableVideo();
+await seekFrame(decoder,1.25,new AbortController().signal);
+assert.equal(decoder.currentTime,1.25);
+const cancelled=new AbortController();
+const pendingFrame=seekFrame(decoder,2,cancelled.signal);
+cancelled.abort();
+await assert.rejects(pendingFrame,{name:'AbortError'});
+
 console.log('Passed tracking, training, pitch and zone analysis, pass/shot suggestions, kit variants, occlusion recovery, track corrections, body contours, playback cues, review grants, feedback, and revocation.');
