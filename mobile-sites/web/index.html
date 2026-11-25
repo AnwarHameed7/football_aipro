@@ -27,11 +27,18 @@
           <button id="markEventTime" type="button" hidden>Use current time</button>
           <button id="jumpReturn" type="button" hidden>Next re-entry</button>
         </div>
+        <div id="longReview" hidden>
+          <p id="longProgress" class="meta" role="status"></p>
+          <div class="row">
+            <button id="scanMatch" type="button" disabled>Scan rest of match</button>
+            <label>Reviewed section <select id="reviewMatchSection" disabled></select></label>
+          </div>
+        </div>
         <p id="selectionHelp" class="meta">Open a clip and pause where your torso is visible.</p>
       </div>
       <div class="videos" id="videos">
         <div>
-          <div class="screen" id="screen"><div class="empty" id="empty">Choose a match or training clip</div><video id="video" controls playsinline hidden></video><canvas id="drawing" hidden></canvas><span id="trackBadge" role="status" class="track-badge" hidden></span></div>
+          <div class="screen" id="screen"><div class="empty" id="empty">Choose a match or training clip</div><video id="video" controls playsinline preload="metadata" hidden></video><canvas id="drawing" hidden></canvas><span id="trackBadge" role="status" class="track-badge" hidden></span></div>
           <p id="clock" class="meta">0:00.000</p>
         </div>
         <div id="comparison" hidden><video id="reference" controls playsinline muted></video><p class="meta" id="referenceName">Reference clip</p></div>

@@ -54,28 +54,26 @@ export async function openDecoder(url,signal) {
 }
 export function closeDecoder(video) { video.pause();video.removeAttribute('src');video.load(); }
 
-export async function analyze({url,sourceVideo,anchor,start=anchor.time,end,lookForBall,signal,progress,onRetry}) {
+export async function analyze({url,sourceVideo,anchor,start=anchor.time,end,lookForBall,signal,progress,onRetry,compact=false,memory=null,engine=null}) {
   signal.throwIfAborted();
   const video=sourceVideo||await openDecoder(url,signal);
   try {
-    return await withPoseFallback(
-      detector=>scanPose(video,detector,{anchor,start,end,lookForBall,signal,progress}),
-      {signal,compatible:appleMobile(),onRetry},
-    );
+    const scan=detector=>scanPose(video,detector,{anchor,start,end,lookForBall,signal,progress,compact,memory});
+    return engine?await scan(engine):await withPoseFallback(scan,{signal,compatible:compact||appleMobile(),onRetry});
   } finally {
     if(!sourceVideo)closeDecoder(video);
   }
 }
 
-async function scanPose(video,detector,{anchor,start,end,lookForBall,signal,progress}) {
+async function scanPose(video,detector,{anchor,start,end,lookForBall,signal,progress,compact=false,memory=null}) {
   let ball=null,ballUnavailable=lookForBall&&!detector.ballSupported,ballAttempted=ballUnavailable;
   const image=document.createElement('canvas');
-  const scale=Math.min(1,640/Math.max(video.videoWidth,video.videoHeight));
+  const scale=Math.min(1,(compact?480:640)/Math.max(video.videoWidth,video.videoHeight));
   image.width=Math.max(1,Math.round(video.videoWidth*scale));
   image.height=Math.max(1,Math.round(video.videoHeight*scale));
   const ctx=image.getContext('2d',{willReadFrequently:true});
   const zoomed=document.createElement('canvas');
-  zoomed.width=zoomed.height=480;
+  zoomed.width=zoomed.height=compact?352:480;
   const zoomContext=zoomed.getContext('2d');
   const trace=document.createElement('canvas');
   const traceScale=112/Math.max(image.width,image.height);
@@ -84,13 +82,20 @@ async function scanPose(video,detector,{anchor,start,end,lookForBall,signal,prog
   const traceContext=trace.getContext('2d',{willReadFrequently:true});
   const frames=[], cues=[], ballSamples=[];
   const begin=Math.max(0,start,anchor.time-165);
-  const stop=Math.min(end,video.duration-.001,begin+180);
+  const stop=Math.min(end-.0001,video.duration-.001,begin+180);
   const forward=[],backward=[];
   for(let time=anchor.time;time<=stop+.0001;time+=.125)forward.push(time);
   for(let time=anchor.time-.125;time>=begin-.0001;time-=.125)backward.push(Math.max(0,time));
   const times=[...forward,...backward];
-  let lock,origin,last,fast=0,nearby=0,lastBall=-10,lastFast=-10;
+  let lock,origin=memory?.seed,last,fast=0,nearby=0,lastBall=-10,lastFast=-10;
+  if(memory) {
+    lock=new PlayerLock(memory.seed,memory.references);
+    lock.last=memory.last;
+    lock.missing=memory.missing;
+  }
   let poseOutline=false,tile=0;
+  let forwardMemory=null;
+  const trackMemory=()=>lock?{seed:origin,references:lock.references,last:lock.last,missing:lock.missing}:null;
   const signatures=new Map();
   const read=async ({crop=null,preferred})=>{
     let people=[];
@@ -121,7 +126,8 @@ async function scanPose(video,detector,{anchor,start,end,lookForBall,signal,prog
       const reverse=i>=forward.length;
       if(reverse&&i===forward.length) {
         if(!origin)break;
-        lock=new PlayerLock(origin,lock.references);
+        forwardMemory=trackMemory();
+        if(!memory)lock=new PlayerLock(origin,lock.references);
         last=null;
       }
       signal.throwIfAborted();
@@ -228,51 +234,56 @@ async function scanPose(video,detector,{anchor,start,end,lookForBall,signal,prog
       }
       if(i%4===0) {progress(.90*(i+1)/times.length);await new Promise(r=>setTimeout(r,0));}
     }
-  } finally {if(ball)closeModel(ball);}
-  if(!origin)throw new PlayerSelectionError();
-  const sorted=frames.sort((a,b)=>a.time-b.time);
-  let retried=0,refined=0;
-  for(let i=1;i<sorted.length-1&&retried<24;i++) {
-    if(sorted[i].points||!sorted[i-1].points)continue;
-    const left=sorted[i-1];
-    const stop=Math.min(sorted.length-1,i+3);
-    let j=i;
-    while(j<=stop&&!sorted[j].points)j++;
-    if(j>stop)continue;
-    const right=sorted[j],before=signatures.get(left.time),after=signatures.get(right.time);
-    if(!before||!after||right.time-left.time>.51)continue;
-    for(let k=i;k<j&&retried<24;k++) {
-      signal.throwIfAborted();
-      retried++;
-      const sample=sorted[k],mix=(sample.time-left.time)/(right.time-left.time);
-      const center={x:before.center.x+(after.center.x-before.center.x)*mix,
-        y:before.center.y+(after.center.y-before.center.y)*mix};
-      await seekFrame(video,sample.time,signal);ctx.drawImage(video,0,0,image.width,image.height);
-      const zoom=Math.min(.76,Math.max(.18,Math.max(before.torso,after.torso)*4));
-      const crop=playerCrop(center,zoom,video.videoWidth,video.videoHeight);
-      const preferred=people=>gapCandidate(people,before,after,mix);
-      const candidates=await read({crop,preferred});
-      const candidate=preferred(candidates);
-      if(candidate) {
-        const outline=candidate.outline?.length?candidate.outline:traceContext?poseContours(candidate.points,traceContext):[];
-        poseOutline ||= !candidate.outline?.length&&outline.length>0;
-        Object.assign(sample,{points:candidate.points,world:candidate.world,outline,state:'tracked'});
-        refined++;
+    if(ball){closeModel(ball);ball=null;}
+    if(!origin)throw new PlayerSelectionError();
+    const sorted=frames.sort((a,b)=>a.time-b.time);
+    let retried=0,refined=0;
+    for(let i=1;i<sorted.length-1&&retried<24;i++) {
+      if(sorted[i].points||!sorted[i-1].points)continue;
+      const left=sorted[i-1];
+      const stop=Math.min(sorted.length-1,i+3);
+      let j=i;
+      while(j<=stop&&!sorted[j].points)j++;
+      if(j>stop)continue;
+      const right=sorted[j],before=signatures.get(left.time),after=signatures.get(right.time);
+      if(!before||!after||right.time-left.time>.51)continue;
+      for(let k=i;k<j&&retried<24;k++) {
+        signal.throwIfAborted();
+        retried++;
+        const sample=sorted[k],mix=(sample.time-left.time)/(right.time-left.time);
+        const center={x:before.center.x+(after.center.x-before.center.x)*mix,
+          y:before.center.y+(after.center.y-before.center.y)*mix};
+        await seekFrame(video,sample.time,signal);ctx.drawImage(video,0,0,image.width,image.height);
+        const zoom=Math.min(.76,Math.max(.18,Math.max(before.torso,after.torso)*4));
+        const crop=playerCrop(center,zoom,video.videoWidth,video.videoHeight);
+        const preferred=people=>gapCandidate(people,before,after,mix);
+        const candidates=await read({crop,preferred});
+        const candidate=preferred(candidates);
+        if(candidate) {
+          const outline=candidate.outline?.length?candidate.outline:traceContext?poseContours(candidate.points,traceContext):[];
+          poseOutline ||= !candidate.outline?.length&&outline.length>0;
+          Object.assign(sample,{points:candidate.points,world:candidate.world,outline,state:'tracked'});
+          refined++;
+        }
+        if(retried%4===0) {
+          progress(.90+retried/240);
+          await new Promise(resolve=>setTimeout(resolve,0));
+        }
       }
-      if(retried%4===0) {
-        progress(.90+retried/240);
-        await new Promise(resolve=>setTimeout(resolve,0));
-      }
+      i=j-1;
     }
-    i=j-1;
+    for(let i=0;i<sorted.length;i++) {
+      const sample=sorted[i];
+      if(!sample.points)continue;
+      sample.state=i>0&&!sorted[i-1].points&&sorted[i-1].time<sample.time-.05?'reacquired':'tracked';
+    }
+    progress(1);
+    return {frames:sorted,cues,ballSamples:ballSamples.sort((a,b)=>a.time-b.time),ballUnavailable,poseOutline,refined,
+      forwardMemory:forwardMemory||trackMemory(),backwardMemory:backward.length?trackMemory():null};
+  } finally {
+    if(ball)closeModel(ball);
+    for(const canvas of [image,zoomed,trace]) {canvas.width=1;canvas.height=1;}
   }
-  for(let i=0;i<sorted.length;i++) {
-    const sample=sorted[i];
-    if(!sample.points)continue;
-    sample.state=i>0&&!sorted[i-1].points&&sorted[i-1].time<sample.time-.05?'reacquired':'tracked';
-  }
-  progress(1);
-  return {frames:sorted,cues,ballSamples:ballSamples.sort((a,b)=>a.time-b.time),ballUnavailable,poseOutline,refined};
 }
 
 function angle(a,b,c) {

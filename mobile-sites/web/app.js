@@ -1,5 +1,8 @@
+import {LONG_CLIP_SECONDS,SECTION_SECONDS,matchKey,matchProgress,nextSection,readMatch,readSection,
+  saveSection,scanSections,sectionAt,sectionRange,startMatch} from './match-review.js';
 import {openPoseReview,savePoseReview} from './saved-pose.js';
 import {poseCoverage,reconnectTrack,sampleAt,skillMoments} from './review-flow.js';
+import {withPoseFallback} from './pose-engine.js';
 import {activeCoachingCue,drawBodyOutline} from './highlight.js';
 import {teamWorkspace} from './team-ui.js';
 import {analyze,attemptReview,coachReview,drawMovementMap,metrics,render3d,skeleton} from './pose.js';
@@ -16,6 +19,8 @@ let weekly=[],outcomes=[],currentPlan=null,activeTeam=null,team=null;
 let dismissedEstimates=[];
 let pitch=[],pendingPitch=null,events=[],matchSamples=[],goalPoints=[],pendingGoal=null,ballSamples=[];
 let anchor, selecting=false, pose=null, coaching=null, markedMoment=null, scanJob=null, scanFailure=null, scanMessage='', exportJob=null, recording=null, voiceDraft='';
+let longSession=null,longKey=null,longReady=null,longIndex=null,longAll=false,longReplace=false,longOverride=null,longReading=null;
+const longClip=()=>ready&&video.duration>LONG_CLIP_SECONDS;
 const hasChanges=()=>tags.length || Object.values(marks).some(items=>items.length) || voiceDraft || report || pitch.length || events.length || team?.hasWork();
 const validAudio=value=>typeof value==='string' && value.length<=2_000_000 &&
   /^data:audio\/(webm|mp4|ogg|wav)(;codecs=[a-zA-Z0-9._,-]+)?;base64,[a-zA-Z0-9+/=]+$/.test(value);
@@ -42,6 +47,7 @@ function loadSource(file, replace=true) {
   if (replace && !allowReplace()) return false;
   scanGeneration++;scanJob?.abort(); exportJob?.abort(); stopVoice(true);
   ready = false;scanFailure=null;scanMessage='';
+  longSession=longKey=longReady=longIndex=longOverride=longReading=null;longAll=longReplace=false;renderLongReview();
   clearExportPreview();
   team?.reset();
   $('controls').disabled = $('tags').disabled = true;
@@ -85,8 +91,10 @@ video.onloadedmetadata = () => {
   updateTargetControls();
   renderMatch();
   paint();
+  if(longClip()&&!longReady)longReady=prepareLongReview(source);
 };
 video.onerror = () => {
+  scanJob?.abort();
   ready = false;
   $('controls').disabled = $('tags').disabled = true;
   updateTargetControls();
@@ -143,6 +151,12 @@ function update(force = false) {
   if (!video.paused && $('loop').checked && (frame() < first || video.currentTime >= (last + 1) / fps())) seek(first / fps());
   status('clock', `${Math.floor(video.currentTime / 60)}:${(video.currentTime % 60).toFixed(3).padStart(6, '0')} · frame ${frame() + 1}`);
   syncReference(force); paint(); updatePosePanel();
+  if(longClip()&&!selecting&&longKey&&longSession) {
+    const index=sectionAt(video.currentTime,video.duration);
+    if(index!==longIndex&&longSession.parts[index]&&!longReading) {
+      longReading=loadLongSection(index,false).finally(()=>{longReading=null;});
+    }
+  }
 }
 for (const name of ['timeupdate','seeked','play','pause']) video.addEventListener(name, () => update(name !== 'timeupdate'));
 if ('requestVideoFrameCallback' in video) {
@@ -222,8 +236,14 @@ canvas.onpointerup = event => {
   if(pendingPitch) {markPitchPoint(x,y);return;}
   if(pendingGoal) {markGoalPoint(x,y);return;}
   if(selecting) {
-    anchor={x,y,time:video.currentTime};scanFailure=null;scanMessage='';
-    previousPose=reconnecting?pose:null;
+    anchor={x,y,time:Math.min(video.currentTime,video.duration-.001)};scanFailure=null;scanMessage='';
+    const wasReconnect=reconnecting;
+    previousPose=!longClip()&&wasReconnect?pose:null;
+    if(longClip()) {
+      longOverride=anchor;
+      longReplace=!wasReconnect;
+      longAll=false;
+    }
     reconnecting=false;
     pose=null;coaching=null;markedMoment=null;matchSamples=[];ballSamples=[];renderCoaching();renderMatch();
     $('candidates').replaceChildren();
@@ -400,9 +420,10 @@ function updateTargetControls() {
   select.setAttribute('aria-pressed',String(selecting));
   select.textContent=selecting?'Cancel selection':anchor?'Change selection':'Select me';
   $('jumpReturn').hidden=!pose?.frames.some(item=>item.state==='reacquired');
-  $('reconnectMe').hidden=!pose||!!scanJob;
+  $('reconnectMe').hidden=(!pose&&!longSession)||!!scanJob;
   $('markMoment').disabled=!pose||!!scanJob;
   $('saveOutcome').disabled=!ready;
+  renderLongReview();
 }
 
 function drawTarget(ctx,rect,sample) {
@@ -451,7 +472,7 @@ $('choosePlayer').onclick=()=>{
   updateCanvasMode();updateTargetControls();paint();
 };
 $('reconnectMe').onclick=()=>{
-  if(!pose||scanJob||!ready)return;
+  if((!pose&&!longSession)||scanJob||!ready)return;
   video.pause();pending=[];pendingPitch=null;pendingGoal=null;team?.cancelPick();
   selecting=true;reconnecting=true;$('tool').value='Pointer';
   status('selectionHelp','Tap your chest where you reappear. Your earlier analysis will be kept.');
@@ -487,6 +508,125 @@ $('model3d').onpointermove=event=>{
   updatePosePanel();
 };
 $('model3d').onpointerup=$('model3d').onpointercancel=()=>{drag=null;};
+const matchTime=time=>`${Math.floor(time/60)}:${String(Math.floor(time%60)).padStart(2,'0')}`;
+function renderLongReview() {
+  const holder=$('longReview');
+  holder.hidden=!longClip();
+  $('stopTrackHere').textContent=holder.hidden?'Stop tracking':'Pause scan';
+  if(holder.hidden)return;
+  const select=$('reviewMatchSection'),action=$('scanMatch');
+  const coverage=matchProgress(longSession,video.duration);
+  const next=longSession?nextSection(longSession,video.duration):null;
+  action.disabled=!!scanJob||!longKey||next===null||!coverage.count;
+  action.textContent=next===null&&coverage.count?'Match scan complete':coverage.count>1?'Continue match scan':'Scan rest of match';
+  const parts=Object.values(longSession?.parts||{}).sort((a,b)=>a.index-b.index);
+  select.replaceChildren(new Option('Choose a section',''));
+  for(const part of parts) {
+    const range=sectionRange(part.index,video.duration);
+    select.add(new Option(`${matchTime(range.start)}–${matchTime(range.end)} · ${part.matched?'player poses':'identity unconfirmed'}`,part.index));
+  }
+  select.value=longIndex===null?'':String(longIndex);
+  select.disabled=!!scanJob||!longKey||!parts.length;
+  status('longProgress',coverage.count?
+    `${matchTime(coverage.seconds)} of ${matchTime(video.duration)} scanned · ${coverage.count} saved sections · ${Math.round(100*coverage.matched/Math.max(1,coverage.total))}% of sampled poses matched. Keep this tab open during a match scan. Use Set in and Set out on a short passage for ball cues.`:
+    `This video is ${matchTime(video.duration)}. Select yourself to scan the current ${SECTION_SECONDS}-second section first.`);
+}
+function displayLongSection(index,result,jump=true) {
+  longIndex=index;
+  const bounds=sectionRange(index,video.duration);
+  pose=result?.frames?.some(frame=>frame.points)?result:null;
+  markedMoment=null;scanFailure=null;report=null;
+  matchSamples=footLocations(pose?.frames||[]);ballSamples=pose?.ballSamples||[];
+  updateCoaching();renderMatch();renderReport();addCandidateButtons(pose?.cues||[]);
+  const firstVisible=pose?.frames.find(frame=>frame.points);
+  if(jump)seek(firstVisible?.time??bounds.start);
+  status('selectionHelp',pose?'Section ready. Play the video to see feedback, or choose another reviewed section.':
+    'This section was scanned. The tracker couldn’t confirm your identity. Use Reconnect me here at a clear moment to rescan it.');
+  if(pose)status('poseStatus',`Playing back a saved section · ${pose.frames.filter(frame=>frame.points).length} matched pose samples.`);
+  updateTargetControls();update(true);
+}
+async function prepareLongReview(clip) {
+  try {
+    const key=await matchKey(clip),saved=await readMatch(key);
+    if(source!==clip)return;
+    longKey=key;
+    if(saved)longSession=saved;
+    if(saved&&!anchor) {
+      anchor=saved.anchor;
+      const index=sectionAt(anchor.time,video.duration);
+      if(saved.parts[index]) {
+        const record=await readSection(key,saved,index);
+        if(source===clip&&!scanJob)displayLongSection(index,restoreSection(record));
+      }
+    }
+  } catch {
+    if(source===clip){longKey=null;status('videoStatus','Browser storage is unavailable. Single sections can still be reviewed.');}
+  } finally {if(source===clip)updateTargetControls();}
+}
+function restoreSection(record) {
+  if(!record)return null;
+  const restored=openPoseReview(record.pose,video.duration);
+  return restored?{...restored,ballSamples:record.ballSamples}:null;
+}
+async function loadLongSection(index,jump) {
+  const clip=source,session=longSession;
+  if(scanJob||!session)return;
+  try {
+    const result=await readSection(longKey,session,index);
+    const stillSelected=jump?$('reviewMatchSection').value===String(index):sectionAt(video.currentTime,video.duration)===index;
+    if(source===clip&&longSession===session&&!scanJob&&!selecting&&stillSelected)
+      displayLongSection(index,restoreSection(result),jump);
+  } catch {if(source===clip)status('selectionHelp','That section could not be restored from browser storage.');}
+}
+$('reviewMatchSection').onchange=()=>{
+  const value=$('reviewMatchSection').value;
+  if(value!=='')loadLongSection(Number(value),true);
+};
+$('scanMatch').onclick=()=>{
+  if(scanJob||!longSession||!longKey)return;
+  longAll=true;$('scanPose').click();
+};
+document.addEventListener('visibilitychange',()=>{
+  if(document.hidden&&longClip()&&scanJob)scanJob.abort();
+});
+async function runLongReview(clip,signal,scan,onRetry) {
+  await longReady;
+  signal.throwIfAborted();
+  const index=sectionAt(anchor.time,video.duration);
+  const all=longAll&&!!longKey;
+  if(!longSession||longReplace) {
+    const newSession={id:crypto.randomUUID(),anchor,parts:{}};
+    if(longKey)await startMatch(longKey,newSession,longSession);
+    signal.throwIfAborted();
+    longSession=newSession;
+    longIndex=null;
+    longReplace=false;
+  }
+  const key=longKey,duration=video.duration;
+  let visible=null;
+  await withPoseFallback(engine=>scanSections({session:longSession,duration,
+    index:all?nextSection(longSession,duration):index,all,anchorOverride:all?null:longOverride||anchor,signal,
+    load:(session,part)=>key?readSection(key,session,part):null,
+    scan:options=>scan({...options,lookForBall:false,compact:true,engine}),
+    save:(session,part,result)=>key?saveSection(key,session,part,{
+      pose:savePoseReview(result,'running',null,'right'),ballSamples:result.ballSamples,
+      forwardMemory:result.forwardMemory,backwardMemory:result.backwardMemory,
+    }):null,
+    onSection(session,part,result) {
+      if(source!==clip)return;
+      longSession=session;
+      if(!visible)visible={part,result};
+      renderLongReview();
+    },
+  }),{signal,compatible:true,onRetry});
+  if(source!==clip||!visible)return;
+  longOverride=null;
+  displayLongSection(visible.part,visible.result);
+  const next=nextSection(longSession,video.duration);
+  status('poseStatus',key?(next===null?'Whole match scanned. Open a reviewed section to replay its outline and feedback.':
+    'Section saved on this device. Scan the rest of the match when you’re ready.'):'Section analyzed. Browser storage is unavailable.');
+}
+
 $('stopPose').onclick=$('stopTrackHere').onclick=()=>scanJob?.abort();
 $('scanPose').onclick=async()=>{
   if(!ready || scanJob) return;
@@ -517,17 +657,23 @@ $('scanPose').onclick=async()=>{
     scanMessage='Loading the pose model. The first scan may take longer.';
     status('poseStatus',scanMessage);updateLiveCoach(null);
     const inRange=last>first&&anchor.time>=first/fps()&&anchor.time<(last+1)/fps();
-    const result=await analyze({url:sourceUrl,sourceVideo:video,anchor,
-      start:previousPose?anchor.time:inRange?first/fps():0,end:inRange?(last+1)/fps():video.duration,
-      lookForBall:$('ballCues').checked,signal:job.signal,onRetry:()=>{
-        $('poseProgress').removeAttribute('value');$('liveProgress').removeAttribute('value');
-        scanMessage='Restarting with a more compatible pose model…';
-        status('poseStatus',scanMessage);updateLiveCoach(null);
-      },progress:value=>{
+    const onRetry=()=>{
+      $('poseProgress').removeAttribute('value');$('liveProgress').removeAttribute('value');
+      scanMessage='Restarting with a more compatible pose model…';
+      status('poseStatus',scanMessage);updateLiveCoach(null);
+    };
+    const run=({index,...options})=>analyze({url:sourceUrl,sourceVideo:video,signal:job.signal,onRetry,progress:value=>{
         $('poseProgress').value=$('liveProgress').value=Math.max(0,Math.min(1,value));
-        scanMessage=`Analyzing selected player · ${Math.round(value*100)}%`;
+        scanMessage=(index===undefined?'Analyzing selected player':`Section starting at ${matchTime(index*SECTION_SECONDS)}`)+
+          ` · ${Math.round(value*100)}%`;
         status('poseStatus',scanMessage);updateLiveCoach(null);
-      }});
+      },...options});
+    if(longClip()&&(longAll||!inRange||(last+1-first)/fps()>SECTION_SECONDS)) {
+      await runLongReview(clip,job.signal,run,onRetry);
+      return;
+    }
+    const result=await run({anchor,start:previousPose?anchor.time:inRange?first/fps():0,
+      end:inRange?(last+1)/fps():video.duration,compact:longClip(),lookForBall:$('ballCues').checked});
     if(source!==clip || generation!==scanGeneration || job.signal.aborted) return;
     pose=reconnectTrack(previousPose,result,anchor.time);
     previousPose=null;
@@ -546,7 +692,7 @@ $('scanPose').onclick=async()=>{
     renderReport();seek(selectedFrame?.time??anchor.time);paint();updatePosePanel();
   } catch(error) {
     if(source===clip&&generation===scanGeneration) {
-      scanFailure=job.signal.aborted?'Tracking stopped. Tap Track me to retry.':
+      scanFailure=job.signal.aborted?(longClip()?'Match scan paused. Completed sections are still available.':'Tracking stopped. Tap Track me to retry.'):
         `Tracking could not finish. ${error?.message||'Try again with a short clip.'}`;
       if(previousPose) {
         pose=previousPose;
@@ -558,7 +704,7 @@ $('scanPose').onclick=async()=>{
       seek(anchor.time);
     }
   } finally {
-    scanJob=null;scanMessage='';$('scanPose').disabled=!ready;
+    scanJob=null;scanMessage='';longAll=false;$('scanPose').disabled=!ready;
     $('stopPose').hidden=$('stopTrackHere').hidden=$('poseProgress').hidden=$('liveProgress').hidden=true;
     updateTargetControls();team?.sync();paint();updateLiveCoach(poseAt(video.currentTime));
   }

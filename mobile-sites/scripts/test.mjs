@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import {PlayerLock, attemptReview, coachReview, metrics, seekFrame} from '../web/pose.js';
 import {PlayerSelectionError, PoseEngineError, modelWithin, withPoseFallback} from '../web/pose-engine.js';
 import {gapCandidate, mergePlayers, playerCrop, reentryCrop, tappedPlayer, uncropPoint} from '../web/player-selection.js';
+import {matchKey, matchProgress, nextSection, scanSections, sectionAt, sectionRange} from '../web/match-review.js';
 import {calibratePitch, estimateId, eventTotals, suggestBallEvents, tacticalZones, unreviewedEstimates} from '../web/match.js';
 import {outcomeRate, planFor} from '../web/training.js';
 import worker from '../dist/server/index.js';
@@ -11,6 +12,40 @@ import {clipNarrationWindow,mixPcmTracks} from '../web/export.js';
 import {openPoseReview,savePoseReview} from '../web/saved-pose.js';
 import {activeCoachingCue,drawBodyOutline,maskContours} from '../web/highlight.js';
 import {assignTrackIds,classifyKit,correctTeam,detectionTiles,kitHistogram,teamShape,teamTimeline} from '../web/team.js';
+
+assert.deepEqual(sectionRange(39,480),{start:468,end:480});
+assert.equal(sectionAt(5400,5400),449);
+assert.notEqual(await matchKey(new Blob(['a'])),await matchKey(new Blob(['b'])));
+const restart=new AbortController(),records=new Map(),queued=[];
+const resumeMemory={last:{center:{x:.3,y:.4}},missing:0};
+let checkpoint={anchor:{x:.4,y:.5,time:287},parts:{}};
+const sectionOptions={
+  duration:480,all:true,load:(_session,index)=>records.get(index),
+  scan:async ({index,anchor,memory,start,end})=>{
+    assert.ok(end-start<=12);
+    assert.ok(anchor.time>=start&&anchor.time<end);
+    if(queued.length)assert.ok(memory);
+    queued.push(index);
+    return {frames:[{points:[1]}],forwardMemory:resumeMemory,backwardMemory:resumeMemory};
+  },
+  save:(session,index,result)=>{records.set(index,result);checkpoint=structuredClone(session);},
+  onSection:()=>{if(queued.length===3)restart.abort();},
+};
+await assert.rejects(scanSections({...sectionOptions,session:checkpoint,index:23,signal:restart.signal}),{name:'AbortError'});
+assert.deepEqual(queued,[23,24,25]);
+assert.equal(nextSection(checkpoint,480),26);
+const completed=await scanSections({...sectionOptions,session:checkpoint,index:26,signal:new AbortController().signal});
+assert.equal(queued.length,40);
+assert.equal(new Set(queued).size,40);
+assert.equal(nextSection(completed,480),null);
+assert.deepEqual(matchProgress(completed,480),{count:40,seconds:480,matched:40,total:40});
+queued.length=0;records.clear();
+checkpoint={anchor:{x:.4,y:.5,time:2752},parts:{}};
+const full=await scanSections({...sectionOptions,duration:5400,session:checkpoint,index:229,signal:new AbortController().signal});
+assert.equal(queued.length,450);
+assert.equal(new Set(queued).size,450);
+assert.equal(nextSection(full,5400),null);
+assert.equal(matchProgress(full,5400).seconds,5400);
 
 const modes=[],closed=[];
 const engineRun=await withPoseFallback(async engine=>{
