@@ -672,6 +672,7 @@ $('scanPose').onclick=async()=>{
       await runLongReview(clip,job.signal,run,onRetry);
       return;
     }
+    if(longClip()) {longReplace=false;longOverride=null;}
     const result=await run({anchor,start:previousPose?anchor.time:inRange?first/fps():0,
       end:inRange?(last+1)/fps():video.duration,compact:longClip(),lookForBall:$('ballCues').checked});
     if(source!==clip || generation!==scanGeneration || job.signal.aborted) return;
