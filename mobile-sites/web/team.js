@@ -180,7 +180,7 @@ export function detectionTiles(width,height,detailed) {
 }
 
 function boxes(detector,canvas,tile,wide) {
-  const {width:w,height:h}=canvas,entries=[];
+  const {width:w,height:h}=canvas,entries=[],balls=[];
   for(const region of detectionTiles(w,h,wide)) {
     let surface=canvas;
     if(region.w!==w||region.h!==h) {
@@ -192,7 +192,13 @@ function boxes(detector,canvas,tile,wide) {
       const b=d.boundingBox;
       const x=Math.max(0,region.x+b.originX),y=Math.max(0,region.y+b.originY);
       const width=Math.min(w-x,b.width),height=Math.min(h-y,b.height);
-      if(width<3||height<6||height<width*.65)continue;
+      const score=d.categories[0]?.score||0;
+      if(d.categories[0]?.categoryName==='sports ball') {
+        if(score>=.47&&width>1&&height>1&&width<.08*w&&height<.12*h)
+          balls.push({center:[(x+width/2)/w,(y+height/2)/h],score});
+        continue;
+      }
+      if(d.categories[0]?.categoryName!=='person'||width<3||height<6||height<width*.65)continue;
       const clipped=(region.x>0&&b.originX<=1)||(region.y>0&&b.originY<=1)||
         (region.x+region.w<w&&b.originX+b.width>=region.w-1)||
         (region.y+region.h<h&&b.originY+b.height>=region.h-1);
@@ -204,20 +210,24 @@ function boxes(detector,canvas,tile,wide) {
     if(selected.every(other=>!overlaps(item.box,other.box)))selected.push(item);
     if(selected.length===35)break;
   }
-  return selected;
+  balls.sort((a,b)=>b.score-a.score);
+  const top=balls[0];
+  const ball=top&&!balls.some(other=>other!==top&&top.score-other.score<.17&&distance(top.center,other.center)>.024)
+    ?top.center:null;
+  return {players:selected,ball};
 }
 
-export async function scanTeams({url,anchors,project,start,end,wide,signal,progress}) {
+export async function scanTeams({url,sourceVideo,anchors,project,start,end,wide,signal,progress}) {
   const detector=await playerDetector();
   signal.throwIfAborted();
-  const video=await openDecoder(url,signal);
+  const video=sourceVideo||await openDecoder(url,signal);
   const canvas=document.createElement('canvas'),tile=document.createElement('canvas');
   const scale=Math.min(1,(wide?1280:768)/Math.max(video.videoWidth,video.videoHeight));
   canvas.width=Math.max(1,Math.round(video.videoWidth*scale));canvas.height=Math.max(1,Math.round(video.videoHeight*scale));
   const ctx=canvas.getContext('2d',{willReadFrequently:true});
   const references={};
   const stop=Math.min(end,video.duration-.004,start+90);
-  if(stop<start) {closeDecoder(video);throw new Error('Choose an interval inside the clip.');}
+  if(stop<start) {if(!sourceVideo)closeDecoder(video);throw new Error('Choose an interval inside the clip.');}
   const frames=[];
   try {
     for(const team of ['A','B']) {
@@ -227,7 +237,7 @@ export async function scanTeams({url,anchors,project,start,end,wide,signal,progr
         signal.throwIfAborted();
         await seekFrame(video,anchor.time,signal);ctx.drawImage(video,0,0,canvas.width,canvas.height);
         const x=anchor.x*canvas.width,y=anchor.y*canvas.height;
-        const candidate=boxes(detector,canvas,tile,wide).find(({box:[a,b,w,h]})=>
+        const candidate=boxes(detector,canvas,tile,wide).players.find(({box:[a,b,w,h]})=>
           x>=a&&x<=a+w&&y>=b+h*.12&&y<=b+h*.6);
         const kit=candidate&&sampleKit(ctx,candidate.box);
         if(kit)references[team].push(kit);
@@ -239,7 +249,8 @@ export async function scanTeams({url,anchors,project,start,end,wide,signal,progr
     for(let i=0,time=start;time<=stop+.00001;i++,time=start+i/3) {
       signal.throwIfAborted();
       await seekFrame(video,time,signal);ctx.drawImage(video,0,0,canvas.width,canvas.height);
-      const players=boxes(detector,canvas,tile,wide).flatMap(({box})=>{
+      const detections=boxes(detector,canvas,tile,wide);
+      const players=detections.players.flatMap(({box})=>{
         const [x,y,w,h]=box;
         const coords=project([(x+w/2)/canvas.width,Math.min(1,(y+h)/canvas.height)]);
         if(!coords)return [];
@@ -249,10 +260,11 @@ export async function scanTeams({url,anchors,project,start,end,wide,signal,progr
       });
       const assigned=assignTrackIds(tracks,players,time,nextId);
       tracks=assigned.tracks;nextId=assigned.nextId;
-      frames.push({time,players:assigned.players});
+      const center=detections.ball,field=center&&project(center);
+      frames.push({time,players:assigned.players,ball:field?{center,field}:null});
       progress((time-start)/Math.max(.334,stop-start));
       await new Promise(resolve=>setTimeout(resolve,0));
     }
-  } finally {closeDecoder(video);}
+  } finally {if(!sourceVideo)closeDecoder(video);}
   return frames;
 }

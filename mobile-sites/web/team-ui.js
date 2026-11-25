@@ -1,10 +1,11 @@
+import {ballControl,formationOverview} from './team-tactics.js';
 import {calibratePitch,drawPitchMap} from './match.js';
 import {scanTeams,TEAM_COLORS,correctTeam,teamShape,teamTimeline} from './team.js';
 
-export function teamWorkspace({video,sourceURL,hasVideo,pitchPoints,selectedRange,attackDirection,seek,armPick,repaint,download}) {
+export function teamWorkspace({video,sourceURL,hasVideo,busy,pitchPoints,selectedRange,attackDirection,seek,armPick,repaint,download}) {
   const $=id=>document.getElementById(id);
   let anchors={},picking=null,frames=[],job=null,fixtureGeneration=0,frameShown=null,selectedTrack=null;
-  let scannedPitch=null;
+  let scannedPitch=null,tactics=null;
   const text=(id,value)=>{if($(id).textContent!==value)$(id).textContent=value;};
   const node=(tag,value)=>{const item=document.createElement(tag);item.textContent=value;return item;};
   const button=(label,fn)=>{const b=node('button',label);b.type='button';b.onclick=fn;return b;};
@@ -20,6 +21,7 @@ export function teamWorkspace({video,sourceURL,hasVideo,pitchPoints,selectedRang
     const map=$('squadMap'),ctx=map.getContext('2d'),w=map.width,h=map.height;
     drawPitchMap(map,null,[]);
     if(!frame) return;
+    if($('teamShowLinks').checked)drawLinks(ctx,w,h);
     for(const p of frame.players) {
       const x=24+(w-48)*p.field[0],y=24+(h-48)*p.field[1];
       ctx.save();
@@ -89,7 +91,7 @@ export function teamWorkspace({video,sourceURL,hasVideo,pitchPoints,selectedRang
       mark.disabled ||= count>=3 && picking!==team;
       mark.textContent=picking===team?'Cancel shirt selection':count?`Team ${team} sampled (${count}/3) · add kit`:`Sample Team ${team} shirt`;
     }
-    $('squadRun').disabled=!(project&&anchors.A&&anchors.B&&hasVideo())||!!job;
+    $('squadRun').disabled=!(project&&anchors.A&&anchors.B&&hasVideo())||!!job||busy();
     $('squadStop').hidden=!job;
     $('squadCorrect').disabled=!frames.length||!!job;
     $('squadCorrect').setAttribute('aria-pressed',String(picking==='correct'));
@@ -100,7 +102,7 @@ export function teamWorkspace({video,sourceURL,hasVideo,pitchPoints,selectedRang
     const timeline=$('squadTime');
     timeline.disabled=!frames.length;
     if(frames.length) {timeline.min=frames[0].time;timeline.max=frames.at(-1).time;}
-    showFrame(true);renderMoments();
+    renderTactics();showFrame(true);renderMoments();
   }
 
   function cancelPick() {picking=null;selectedTrack=null;sync();}
@@ -144,7 +146,7 @@ export function teamWorkspace({video,sourceURL,hasVideo,pitchPoints,selectedRang
   $('squadStop').onclick=()=>job?.abort();
   $('squadRun').onclick=async()=>{
     const points=pitchPoints(),project=calibratePitch(points);
-    if(!project||!anchors.A||!anchors.B||job)return;
+    if(!project||!anchors.A||!anchors.B||job||busy())return;
     const generation=fixtureGeneration, controller=new AbortController();
     const range=selectedRange(),start=range?.start??video.currentTime,end=range?.end??video.duration;
     const source=sourceURL();
@@ -152,7 +154,7 @@ export function teamWorkspace({video,sourceURL,hasVideo,pitchPoints,selectedRang
     $('squadProgress').hidden=false;$('squadProgress').removeAttribute('value');
     text('squadHelp','Loading the player detector…');sync();
     try {
-      const result=await scanTeams({url:source,anchors,project,start,end,wide:$('squadWide').checked,signal:job.signal,
+      const result=await scanTeams({url:source,sourceVideo:video,anchors,project,start,end,wide:$('squadWide').checked,signal:job.signal,
         progress:value=>{
           $('squadProgress').value=Math.max(0,Math.min(1,value));
           text('squadHelp',`Analyzing both teams · ${Math.round(value*100)}%`);
@@ -220,11 +222,51 @@ export function teamWorkspace({video,sourceURL,hasVideo,pitchPoints,selectedRang
     scannedPitch=calibratePitch(data?.pitch)?data.pitch:null;
     frames=Array.isArray(data?.frames)&&scannedPitch?data.frames.slice(0,271).filter(frame=>
       frame&&Number.isFinite(frame.time)&&frame.time>=0&&frame.time<=video.duration&&Array.isArray(frame.players))
-      .map(frame=>({time:frame.time,players:frame.players.slice(0,70).filter(p=>p&&position(p.field)&&
+      .map(frame=>({time:frame.time,ball:position(frame.ball?.center)&&position(frame.ball?.field)?frame.ball:null,players:frame.players.slice(0,70).filter(p=>p&&position(p.field)&&
         ['A','B',null].includes(p.team)&&Array.isArray(p.box)&&p.box.length===4&&
         p.box.every(n=>Number.isFinite(n)&&n>=0&&n<=1)&&(!p.team||Number.isInteger(p.id)))})):[];
     sync();
   }
+  function drawLinks(ctx,w,h) {
+    ctx.save();ctx.globalAlpha=.60;
+    for(const link of tactics?.links.slice(0,8)||[]) {
+      const [x,y]=link.fromField,[a,b]=link.toField;
+      ctx.strokeStyle=TEAM_COLORS[link.team];ctx.lineWidth=Math.min(7,1.5+link.count);
+      ctx.beginPath();ctx.moveTo(24+(w-48)*x,24+(h-48)*y);
+      ctx.lineTo(24+(w-48)*a,24+(h-48)*b);ctx.stroke();
+    }
+    ctx.restore();
+  }
+  function renderTactics() {
+    const formation=$('teamFormation'),possession=$('teamPossession'),transfers=$('teamTransfers');
+    formation.replaceChildren();possession.replaceChildren();transfers.replaceChildren();
+    tactics=ballControl(frames);
+    $('teamEventCsv').disabled=!tactics.events.length;
+    if(!frames.length)return;
+    for(const item of formationOverview(frames,attackDirection())) {
+      formation.append(node('li',item.shape?`Team ${item.team} · visible lines ${item.shape} in ${item.support}/${item.eligible} eligible samples`:
+        `Team ${item.team} · no stable 10-outfield-player shape identified.`));
+    }
+    const {A,B,unknown}=tactics.seconds,total=A+B;
+    possession.append(node('li',total>0
+      ? `Visible ball control · Team A ${Math.round(A/total*100)}% · Team B ${Math.round(B/total*100)}% · ${unknown.toFixed(1)} s unclear`
+      : `No confident ball control. ${unknown.toFixed(1)} s unclear.`));
+    if(!tactics.events.length)transfers.append(node('li','No reliable pass or turnover candidates in this interval.'));
+    for(const event of tactics.events.slice(0,18)) {
+      const li=node('li','');
+      const desc=event.kind==='pass'?'Possible pass':'Possible turnover';
+      li.append(node('strong',`${event.time.toFixed(2)} s · ${desc} · ${event.team}${event.from} to ${event.newTeam}${event.to}`),
+        button('Replay',()=>{video.pause();seek(Math.max(0,event.time-1));$('footage').scrollIntoView();}));
+      transfers.append(li);
+    }
+  }
+  $('teamShowLinks').onchange=()=>{showFrame(true);repaint();};
+  $('teamEventCsv').onclick=()=>{
+    const rows=[['time_s','candidate','from_team','from_track','to_team','to_track']];
+    for(const event of tactics?.events||[])rows.push([event.time.toFixed(3),event.kind,event.team,event.from,event.newTeam,event.to]);
+    download(new Blob([rows.map(row=>row.join(',')).join('\r\n')],{type:'text/csv'}),'football-team-candidates.csv');
+  };
+
   function reset() {
     fixtureGeneration++;job?.abort();anchors={};picking=null;selectedTrack=null;frames=[];scannedPitch=null;frameShown=null;
     text('squadHelp','Mark the four pitch corners and sample one shirt from each team.');sync();
@@ -276,6 +318,6 @@ export function teamWorkspace({video,sourceURL,hasVideo,pitchPoints,selectedRang
     sync();repaint();
   };
   sync();
-  return {sync,cancelPick,select,overlay,restore,reset,isPicking:()=>!!picking,hasWork:()=>!!(frames.length||anchors.A||anchors.B),
+  return {sync,cancelPick,select,overlay,restore,reset,isScanning:()=>!!job,isPicking:()=>!!picking,hasWork:()=>!!(frames.length||anchors.A||anchors.B),
     snapshot:()=>({anchors,frames,pitch:scannedPitch})};
 }

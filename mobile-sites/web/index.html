@@ -21,6 +21,7 @@
         <div class="row">
           <button id="choosePlayer" class="primary" type="button" disabled aria-pressed="false">Select me</button>
           <button id="trackMe" type="button" disabled>Track me</button>
+          <button id="reconnectMe" type="button" hidden>Reconnect me here</button>
           <button id="stopTrackHere" type="button" hidden>Stop tracking</button>
           <button id="markMoment" type="button" hidden disabled>Mark contact</button>
           <button id="markEventTime" type="button" hidden>Use current time</button>
@@ -59,7 +60,7 @@
         </div>
         <p class="meta">Set the source FPS for frame stepping and desktop review files. Angles are measured in the image plane.</p>
       </fieldset>
-      <div class="row"><button id="exportClip" type="button" disabled>Export annotated clip</button><label><input id="exportAudio" type="checkbox" checked>Include original audio</label><button id="cancelExport" type="button" hidden>Cancel export</button></div>
+      <div class="row"><button id="exportClip" type="button" disabled>Export annotated clip</button><label><input id="exportAudio" type="checkbox" checked>Include original audio</label><label><input id="exportVoice" type="checkbox">Mix coach voice notes</label><button id="cancelExport" type="button" hidden>Cancel export</button></div>
       <progress id="exportProgress" hidden aria-label="Export progress"></progress>
       <p class="meta" id="videoStatus" role="status" aria-live="polite">Clips are opened locally in this browser.</p>
     </section>
@@ -89,7 +90,7 @@
       <button id="stopPose" type="button" hidden>Stop analysis</button>
       <label><input id="showOutline" type="checkbox" checked>Body outline</label>
       <label><input id="showPose" type="checkbox">Skeleton</label>
-      <label><input id="ballCues" type="checkbox">Look for ball proximity</label>
+      <label><input id="ballCues" type="checkbox" checked>Look for ball proximity</label>
     </div>
     <progress id="poseProgress" hidden aria-label="Pose analysis progress"></progress>
     <p id="poseStatus" class="meta" role="status">Tracking runs on this device. Use Select me above the video to start.</p>
@@ -106,6 +107,7 @@
       <label id="kickSideLabel" hidden>Kicking foot <select id="kickSide"><option value="right">Right</option><option value="left">Left</option></select></label>
     </div>
     <p class="meta" id="attemptHelp" hidden></p>
+    <ul id="skillMoments" aria-label="Suggested skill moments"></ul>
     <p class="meta" id="coachSummary" role="status">Select yourself and tap Track me to get feedback on your movement.</p>
     <div id="manualReview" hidden>
       <label>What did you see? <select id="decisionResult"><option value="late">My scan or movement was late</option><option value="closed">My movement didn’t open a passing lane</option><option value="early">I scanned and moved into space in time</option></select></label>
@@ -179,6 +181,12 @@
       </div>
       <div><ul id="squadMetrics"></ul><h3>Moments to review</h3><ul id="squadMoments"></ul></div>
     </div>
+    <details>
+      <summary>Formation, possession and passing links</summary>
+      <p class="meta">Estimates from visible detections. Pass and turnover candidates need replay confirmation. Unclear ball time is shown separately.</p>
+      <div class="row"><label><input id="teamShowLinks" type="checkbox">Draw passing links on pitch</label><button id="teamEventCsv" disabled type="button">Export suggested events CSV</button></div>
+      <ul id="teamFormation"></ul><ul id="teamPossession"></ul><ul id="teamTransfers"></ul>
+    </details>
   </section>
   <section class="panel library" id="libraryPanel">
     <div class="pane-header"><h2>Private review library</h2><button id="refreshLibrary" type="button">Refresh</button></div>

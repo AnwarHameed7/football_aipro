@@ -39,17 +39,48 @@ async function mp4Encoder(canvas,rate) {
   };
 }
 
+export function clipNarrationWindow(noteStart,noteDuration,clipStart,clipEnd) {
+  const begin=Math.max(noteStart,clipStart),end=Math.min(noteStart+noteDuration,clipEnd);
+  return end>begin?{delay:begin-clipStart,offset:begin-noteStart,duration:end-begin}:null;
+}
+
+async function prepareNarration(context,notes,start,end,signal) {
+  const voices=[];let skipped=0;
+  for(const candidate of (notes||[]).slice(0,8)) {
+    signal.throwIfAborted();
+    try {
+      const bytes=Uint8Array.from(atob(candidate.audio.split(',')[1]),character=>character.charCodeAt(0));
+      const buffer=await context.decodeAudioData(bytes.buffer);
+      const span=clipNarrationWindow(candidate.start,buffer.duration,start,end);
+      if(span)voices.push({buffer,...span});
+    } catch { skipped++; }
+  }
+  return {voices,skipped};
+}
+
 async function recording(canvas,video,options,type) {
   if(typeof canvas.captureStream!=='function') throw new Error('Video export is unavailable on this browser.');
   const stream=canvas.captureStream(24);
-  let source,recorder;
+  let source,recorder,output,narration={voices:[],skipped:0};
+  const scheduled=[];
   try {
     if(options.audioContext) {
-      source=options.audioContext.createMediaElementSource(video);
-      const destination=options.audioContext.createMediaStreamDestination();
-      source.connect(destination);
-      video.muted=false;
-      for(const track of destination.stream.getAudioTracks()) stream.addTrack(track);
+      const ctx=options.audioContext;
+      output=ctx.createMediaStreamDestination();
+      narration=await prepareNarration(ctx,options.voiceNotes,options.start,options.end,options.signal);
+      options.signal.throwIfAborted();
+      if(options.includeOriginal!==false) {
+        source=ctx.createMediaElementSource(video);
+        if(narration.voices.length) {
+          const gain=ctx.createGain();
+          gain.gain.value=.62;
+          source.connect(gain);gain.connect(output);
+        } else source.connect(output);
+        video.muted=false;
+      }
+      if(!source&&!narration.voices.length)
+        throw new Error('No playable voice notes match this clip interval.');
+      for(const track of output.stream.getAudioTracks()) stream.addTrack(track);
     }
     recorder=new MediaRecorder(stream,{mimeType:type,videoBitsPerSecond:2_500_000});
   } catch(error) {
@@ -70,6 +101,17 @@ async function recording(canvas,video,options,type) {
     options.draw(canvas,video,options.start);
     recorder.start();
     await video.play();
+    const startTime=options.audioContext?.currentTime??0;
+    for(const voice of narration.voices) {
+      const voiceSource=options.audioContext.createBufferSource(),gain=options.audioContext.createGain();
+      const advance=Math.max(0,video.currentTime-options.start-voice.delay);
+      if(advance>=voice.duration)continue;
+      voiceSource.buffer=voice.buffer;gain.gain.value=.75;
+      voiceSource.connect(gain);gain.connect(output);
+      voiceSource.start(startTime+Math.max(0,voice.delay-(video.currentTime-options.start)),
+        voice.offset+advance,voice.duration-advance);
+      scheduled.push(voiceSource);
+    }
     const deadline=performance.now()+Math.max(10_000,(options.end-options.start+10)*1000);
     while(!video.ended && video.currentTime<options.end) {
       options.signal.throwIfAborted();
@@ -83,9 +125,10 @@ async function recording(canvas,video,options,type) {
     if(error) throw error;
     const blob=new Blob(chunks,{type:recorder.mimeType||type});
     if(!blob.size) throw new Error('The browser returned an empty recording.');
-    return {blob,extension:type.startsWith('video/mp4')?'mp4':'webm',audio:!!source};
+    return {blob,extension:type.startsWith('video/mp4')?'mp4':'webm',audio:!!source,narration:scheduled.length,skipped:narration.skipped};
   } finally {
     restore();
+    for(const voice of scheduled){try{voice.stop();}catch{}voice.disconnect();}
     if(recorder.state!=='inactive') recorder.stop();
     source?.disconnect();
     for(const track of stream.getTracks()) track.stop();

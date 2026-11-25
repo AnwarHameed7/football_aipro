@@ -1,3 +1,5 @@
+import {openPoseReview,savePoseReview} from './saved-pose.js';
+import {reconnectTrack,sampleAt,skillMoments} from './review-flow.js';
 import {activeCoachingCue,drawBodyOutline} from './highlight.js';
 import {teamWorkspace} from './team-ui.js';
 import {analyze,attemptReview,coachReview,drawMovementMap,metrics,render3d,skeleton} from './pose.js';
@@ -16,6 +18,7 @@ let anchor, selecting=false, pose=null, coaching=null, markedMoment=null, scanJo
 const hasChanges=()=>tags.length || Object.values(marks).some(items=>items.length) || voiceDraft || report || pitch.length || events.length || team?.hasWork();
 const validAudio=value=>typeof value==='string' && value.length<=2_000_000 &&
   /^data:audio\/(webm|mp4|ogg|wav)(;codecs=[a-zA-Z0-9._,-]+)?;base64,[a-zA-Z0-9+/=]+$/.test(value);
+let reconnecting=false, previousPose=null, scanGeneration=0;
 let first = 0, last = 0, pending = [], pendingFrame = null, editing = -1, offset = 0, ready = false;
 for (const name of categories) $('category').add(new Option(name, name));
 for (const [id,skill] of Object.entries(skills)) $('coachMode').add(new Option(skill.label,id));
@@ -36,7 +39,7 @@ $('source').onchange = event => {
 const allowReplace=()=>!hasChanges() || confirm('Replace the current work in this tab? Save it first to keep the review.');
 function loadSource(file, replace=true) {
   if (replace && !allowReplace()) return false;
-  scanJob?.abort(); exportJob?.abort(); stopVoice(true);
+  scanGeneration++;scanJob?.abort(); exportJob?.abort(); stopVoice(true);
   ready = false;scanFailure=null;scanMessage='';
   team?.reset();
   $('controls').disabled = $('tags').disabled = true;
@@ -51,7 +54,7 @@ function loadSource(file, replace=true) {
   tags = []; marks = {}; report = null; pending = []; first = 0; last = 0;
   pitch=[];pendingPitch=null;events=[];matchSamples=[];goalPoints=[];pendingGoal=null;ballSamples=[];
   $('attackDirection').value='right';$('eventForm').reset();$('markEventTime').hidden=true;renderMatch();
-  anchor=null;selecting=false;pose=null;coaching=null;markedMoment=null;renderCoaching();$('candidates').replaceChildren();updateCanvasMode();updateTargetControls();
+  anchor=null;selecting=false;reconnecting=false;previousPose=null;pose=null;coaching=null;markedMoment=null;renderCoaching();$('candidates').replaceChildren();updateCanvasMode();updateTargetControls();
   $('trackBadge').hidden=true;
   status('selectionHelp','Pause when your full body is visible, then tap Select me.');
   resetEditor(); renderTags(); renderReport(); range(); updatePosePanel();
@@ -63,10 +66,12 @@ function waitForSource() {
   return new Promise((resolve,reject)=>{
     if(ready) {resolve();return;}
     const finish=error=>{
+      clearTimeout(timer);
       video.removeEventListener('loadedmetadata',ok);video.removeEventListener('error',bad);
       if(error || !ready) reject(error||new Error('This clip cannot be read.')); else resolve();
     };
     const ok=()=>finish(),bad=()=>finish(new Error('This clip cannot be decoded.'));
+    const timer=setTimeout(bad,8000);
     video.addEventListener('loadedmetadata',ok,{once:true});video.addEventListener('error',bad,{once:true});
   });
 }
@@ -132,7 +137,7 @@ $('fps').onchange = () => {
   first = 0; last = 0; range(); paint();
 };
 function update(force = false) {
-  if (!ready||scanJob) return;
+  if (!ready||scanJob||team?.isScanning()) return;
   if (!video.paused && $('loop').checked && (frame() < first || video.currentTime >= (last + 1) / fps())) seek(first / fps());
   status('clock', `${Math.floor(video.currentTime / 60)}:${(video.currentTime % 60).toFixed(3).padStart(6, '0')} · frame ${frame() + 1}`);
   syncReference(force); paint(); updatePosePanel();
@@ -216,10 +221,13 @@ canvas.onpointerup = event => {
   if(pendingGoal) {markGoalPoint(x,y);return;}
   if(selecting) {
     anchor={x,y,time:video.currentTime};scanFailure=null;scanMessage='';
+    previousPose=reconnecting?pose:null;
+    reconnecting=false;
     pose=null;coaching=null;markedMoment=null;matchSamples=[];ballSamples=[];renderCoaching();renderMatch();
     $('candidates').replaceChildren();
     selecting=false; updateCanvasMode(); updateTargetControls();
-    status('selectionHelp','Selection marked. Tap Track me to follow this player through the clip.');
+    status('selectionHelp',previousPose?'Reconnect point marked. Tap Track me to keep the earlier track and rescan from here.':
+      'Selection marked. Tap Track me to follow this player through the clip.');
     status('poseStatus',`Player selected at ${anchor.time.toFixed(2)} s.`);
     paint();updatePosePanel();return;
   }
@@ -293,7 +301,8 @@ function download(blob,name) {
   setTimeout(() => URL.revokeObjectURL(url), 30000);
 }
 function reviewData() {
-  return {version:1,source:source.name,fps:fps(),frame_count:frameCount(),tags,drawings:marks,movement_review:report,training:{weekly,outcomes},match:{pitch,events,samples:matchSamples,goalPoints,ballSamples,attack:$('attackDirection').value,team:team?.snapshot()}};
+  return {version:1,source:source.name,fps:fps(),frame_count:frameCount(),tags,drawings:marks,movement_review:report,
+    personal:savePoseReview(pose,$('coachMode').value,markedMoment,$('kickSide').value),training:{weekly,outcomes},match:{pitch,events,samples:matchSamples,goalPoints,ballSamples,attack:$('attackDirection').value,team:team?.snapshot()}};
 }
 $('json').onclick = () => {
   const data = reviewData();
@@ -354,11 +363,26 @@ function applyReview(data, confirmReplace=true) {
     }
     if (confirmReplace && !allowReplace()) return;
     $('fps').value=data.fps; $('fps').dataset.active=data.fps;
+    scanGeneration++;scanJob?.abort();
     tags=verified; marks=drawings; report=data.movement_review; pending=[]; first=0; last=0;
+    const restored=openPoseReview(data.personal,video.duration);
+    pose=restored;previousPose=null;anchor=null;selecting=false;reconnecting=false;coaching=null;
+    scanFailure=null;markedMoment=restored?.moment??null;
+    $('coachMode').value=Object.hasOwn(skills,restored?.mode)?restored.mode:'running';
+    $('kickSide').value=restored?.foot==='left'?'left':'right';
     restoreTraining(data.training);
     restoreMatch(data.match);
+    if(pose) {
+      pose.ballSamples=ballSamples;
+      matchSamples=footLocations(pose.frames);
+      addCandidateButtons(pose.cues);
+      renderMatch();
+      seek(pose.frames.find(item=>item.points).time);
+    } else $('candidates').replaceChildren();
+    updateCanvasMode();updateTargetControls();updateCoaching();updatePosePanel();
     resetEditor(); renderTags(); range(); paint(); renderReport(); renderTraining();
-    status('reviewStatus','Review imported.');
+    status('reviewStatus',restored?.truncated?'Review imported. A long personal scan was saved through the first 2,400 samples.':
+      restored?'Review imported with your outline and coaching.':'Review imported.');
 }
 
 function updateCanvasMode() {
@@ -374,6 +398,7 @@ function updateTargetControls() {
   select.setAttribute('aria-pressed',String(selecting));
   select.textContent=selecting?'Cancel selection':anchor?'Change selection':'Select me';
   $('jumpReturn').hidden=!pose?.frames.some(item=>item.state==='reacquired');
+  $('reconnectMe').hidden=!pose||!!scanJob;
   $('markMoment').disabled=!pose||!!scanJob;
   $('saveOutcome').disabled=!ready;
 }
@@ -399,9 +424,8 @@ function updateTrackBadge(sample) {
   else if(sample?.state==='checking') [state,label]=['checking','Checking possible re-entry'];
   else if(sample && !sample.points) [state,label]=['lost','You’re off-screen or the match is unclear'];
   else if(sample?.points) {
-    const index=Math.round((sample.time-pose.frames[0].time)*8);
-    const recent=pose.frames.slice(Math.max(0,index-5),index+1);
-    const returned=recent.some(item=>item.state==='reacquired');
+    const returned=pose.frames.some(item=>item.state==='reacquired'&&
+      item.time<=sample.time&&sample.time-item.time<.65);
     [state,label]=['tracked',returned?'Found you again':'Tracking you'];
   } else if(anchor && !pose) [state,label]=['selected','Selection marked · tap Track me'];
   else if(pose) [state,label]=['checking','Outside analyzed range'];
@@ -413,6 +437,7 @@ function updateTrackBadge(sample) {
 }
 $('choosePlayer').onclick=()=>{
   if(!ready) return;
+  reconnecting=false;
   video.pause();pending=[];pendingPitch=null;pendingGoal=null;team?.cancelPick();selecting=!selecting;
   if(selecting) {
     $('tool').value='Pointer';
@@ -422,18 +447,20 @@ $('choosePlayer').onclick=()=>{
   }
   updateCanvasMode();updateTargetControls();paint();
 };
+$('reconnectMe').onclick=()=>{
+  if(!pose||scanJob||!ready)return;
+  video.pause();pending=[];pendingPitch=null;pendingGoal=null;team?.cancelPick();
+  selecting=true;reconnecting=true;$('tool').value='Pointer';
+  status('selectionHelp','Tap your chest where you reappear. Your earlier analysis will be kept.');
+  updateCanvasMode();updateTargetControls();paint();
+};
 $('trackMe').onclick=()=>$('scanPose').click();
 $('jumpReturn').onclick=()=>{
   const moments=pose?.frames.filter(item=>item.state==='reacquired')||[];
   const next=moments.find(item=>item.time>video.currentTime+.08)||moments[0];
   if(next) {video.pause();seek(next.time);}
 };
-function poseAt(time) {
-  const frames=pose?.frames;
-  if(!frames?.length || time<frames[0].time-.06) return null;
-  const item=frames[Math.round((time-frames[0].time)*8)];
-  return item && Math.abs(time-item.time)<.13 ? item : null;
-}
+function poseAt(time) { return sampleAt(pose?.frames,time); }
 function updatePosePanel() {
   const sample=poseAt(video.currentTime);
   render3d($('model3d'),sample,Number($('rotation').value));
@@ -460,16 +487,17 @@ $('model3d').onpointerup=$('model3d').onpointercancel=()=>{drag=null;};
 $('stopPose').onclick=$('stopTrackHere').onclick=()=>scanJob?.abort();
 $('scanPose').onclick=async()=>{
   if(!ready || scanJob) return;
+  if(team?.isScanning()) {status('videoStatus','Stop the team scan before running personal tracking.');return;}
   if(!anchor) {
     $('choosePlayer').click();
     return;
   }
-  const job=new AbortController(),clip=source;
+  const job=new AbortController(),clip=source,generation=scanGeneration;
   scanJob=job;scanFailure=null;scanMessage='Opening the video frames…';
   $('scanPose').disabled=true;
   $('stopPose').hidden=$('stopTrackHere').hidden=$('poseProgress').hidden=$('liveProgress').hidden=false;
   $('poseProgress').removeAttribute('value');$('liveProgress').removeAttribute('value');
-  updateTargetControls();paint();updateLiveCoach(null);
+  updateTargetControls();team?.sync();paint();updateLiveCoach(null);
   try {
     // Keep the seekable element the viewer already opened. iOS can defer decoding a second, unseen video.
     if(video.readyState<2) {
@@ -491,11 +519,12 @@ $('scanPose').onclick=async()=>{
         scanMessage=`Analyzing selected player · ${Math.round(value*100)}%`;
         status('poseStatus',scanMessage);updateLiveCoach(null);
       }});
-    if(source!==clip || job.signal.aborted) return;
-    pose=result;
-    matchSamples=footLocations(result.frames);ballSamples=result.ballSamples||[];
+    if(source!==clip || generation!==scanGeneration || job.signal.aborted) return;
+    pose=reconnectTrack(previousPose,result,anchor.time);
+    previousPose=null;
+    matchSamples=footLocations(pose.frames);ballSamples=pose.ballSamples||[];
     updateCoaching();renderMatch();
-    addCandidateButtons(result.cues);
+    addCandidateButtons(pose.cues);
     const matched=result.frames.filter(item=>item.points).length;
     const returns=result.frames.filter(item=>item.state==='reacquired').length;
     status('selectionHelp',returns?`Play for coach feedback. Found you again ${returns} time(s); use Next re-entry to review.`:
@@ -505,23 +534,29 @@ $('scanPose').onclick=async()=>{
     const firstVisible=result.frames.find(frame=>frame.points);
     renderReport();seek(firstVisible?.time??anchor.time);paint();updatePosePanel();
   } catch(error) {
-    if(source===clip) {
+    if(source===clip&&generation===scanGeneration) {
       scanFailure=job.signal.aborted?'Tracking stopped. Tap Track me to retry.':
         `Tracking could not finish. ${error?.message||'Try again with a short clip.'}`;
+      if(previousPose) {
+        pose=previousPose;
+        matchSamples=footLocations(pose.frames);ballSamples=pose.ballSamples||[];
+        updateCoaching();renderMatch();addCandidateButtons(pose.cues);
+        scanFailure+=' Your earlier analysis is still available.';
+      }
       status('poseStatus',scanFailure);status('selectionHelp',scanFailure);
       seek(anchor.time);
     }
   } finally {
     scanJob=null;scanMessage='';$('scanPose').disabled=!ready;
     $('stopPose').hidden=$('stopTrackHere').hidden=$('poseProgress').hidden=$('liveProgress').hidden=true;
-    updateTargetControls();paint();updateLiveCoach(poseAt(video.currentTime));
+    updateTargetControls();team?.sync();paint();updateLiveCoach(poseAt(video.currentTime));
   }
 };
 function poseReport(result) {
   const spans=[];
   for(let i=0;i<result.frames.length;) {
     const start=i, matched=!!result.frames[i].points, values={};
-    while(i<result.frames.length && i-start<16 && !!result.frames[i].points===matched) {
+    while(i<result.frames.length && i-start<16 && (i===start||result.frames[i].time-result.frames[i-1].time<=.2) && !!result.frames[i].points===matched) {
       for(const [label,value] of metrics(result.frames[i])) (values[label] ||= []).push(value);
       i++;
     }
@@ -572,18 +607,23 @@ $('exportClip').onclick=async()=>{
   const job=new AbortController(),clip=source,rate=fps(),show=$('showPose').checked,outline=$('showOutline').checked;
   exportJob=job;$('exportClip').disabled=true;$('cancelExport').hidden=$('exportProgress').hidden=false;
   $('exportProgress').value=0;
-  const audioRequested=$('exportAudio').checked;
+  const includeOriginal=$('exportAudio').checked;
+  const voiceNotes=$('exportVoice').checked?tags.filter(tag=>validAudio(tag.voice)&&tag.start/rate<end&&tag.start/rate+30>start)
+    .sort((a,b)=>a.start-b.start).slice(0,8).map(tag=>({start:tag.start/rate,audio:tag.voice})):[];
+  const audioRequested=includeOriginal||voiceNotes.length>0;
   let audioContext;
   status('videoStatus',audioRequested?'Exporting annotated video with audio…':'Exporting annotated video…');
   try {
+    if($('exportVoice').checked&&!voiceNotes.length&&!includeOriginal)
+      throw new Error('Record a tagged voice note inside this interval or turn off voice mixing.');
     if(audioRequested) {
       const Context=window.AudioContext||window.webkitAudioContext;
-      if(!Context) throw new Error('This browser cannot include audio. Turn off Include original audio to export video only.');
+      if(!Context) throw new Error('This browser cannot include audio. Turn off both audio options to export video only.');
       audioContext=new Context();
       await audioContext.resume();
       if(audioContext.state!=='running') throw new Error('Audio is unavailable. Try again or turn off Include original audio.');
     }
-    const result=await exportClip({url:sourceUrl,start,end,audioContext,signal:job.signal,
+    const result=await exportClip({url:sourceUrl,start,end,audioContext,includeOriginal,voiceNotes,signal:job.signal,
       progress:value=>{$('exportProgress').value=value;},
       draw(surface,decoder,time){
         const ctx=surface.getContext('2d'),rect={x:0,y:0,w:surface.width,h:surface.height};
@@ -593,7 +633,9 @@ $('exportClip').onclick=async()=>{
       }});
     if(!job.signal.aborted && source===clip) {
       download(result.blob,`football-clip.${result.extension}`);
-      status('videoStatus',`Exported annotated ${result.extension.toUpperCase()}${result.audio?' with the source audio track':' without audio'}.`);
+      const audio=[result.audio?'source audio':'',result.narration?`${result.narration} voice note(s)`:''].filter(Boolean);
+      status('videoStatus',`Exported annotated ${result.extension.toUpperCase()}${audio.length?' with '+audio.join(' and '):' without audio'}.`+
+        (result.skipped?` ${result.skipped} voice note(s) could not be decoded.`:''));
     }
   } catch(error) {
     if(source===clip)status('videoStatus',job.signal.aborted?'Export cancelled.':`Export unavailable. ${error.message}`);
@@ -725,9 +767,22 @@ function updateCoaching() {
   $('saveOutcome').disabled=!ready;
   $('manualReview').hidden=!skill.manual;
   $('attemptHelp').hidden=running;
+  const suggestions=pose&&!running&&!skill.manual?skillMoments(mode,{
+    frames:pose.frames,ballSamples:pose.ballSamples,eventSuggestions:suggestBallEvents(pose.ballSamples||[],goalPoints)
+  }):[];
+  const suggestionList=$('skillMoments');
+  suggestionList.replaceChildren();
+  for(const suggested of suggestions) {
+    const item=element('li','');
+    item.append(button(`${suggested.time.toFixed(2)} s · ${suggested.label}`,()=>{
+      video.pause();markedMoment=suggested.time;seek(suggested.time);updateCoaching();
+    }));
+    suggestionList.append(item);
+  }
   status('successLabel',skill.outcome||'Repeats at your target form');
   if(!running) status('attemptHelp',markedMoment===null
-    ? `Track yourself, scrub to the ${skill.mark}, then mark it above the video.`
+    ? suggestions.length?'Choose a suggested moment or mark the exact frame yourself.':
+      `Track yourself, scrub to the ${skill.mark}, then mark it above the video.`
     : `Marked ${skill.mark} at ${markedMoment.toFixed(2)} s.`);
   const aspect=video.videoWidth/video.videoHeight;
   if(!pose) coaching=null;
@@ -1171,7 +1226,7 @@ $('teamFeedback').onsubmit=async event=>{
 };
 
 team=teamWorkspace({
-  video,sourceURL:()=>sourceUrl,hasVideo:()=>ready,pitchPoints:()=>pitch,
+  video,sourceURL:()=>sourceUrl,hasVideo:()=>ready,busy:()=>!!scanJob,pitchPoints:()=>pitch,
   selectedRange:()=>last>first?{start:first/fps(),end:(last+1)/fps()}:null,
   attackDirection:()=>$('attackDirection').value,seek,
   armPick:()=>{selecting=false;pendingPitch=null;pendingGoal=null;pending=[];$('tool').value='Pointer';updateTargetControls();},

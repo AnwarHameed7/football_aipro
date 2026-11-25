@@ -37,7 +37,7 @@ function model(kind) {
   if(kind==='people') return peoplePromise ||= runtime.then(({library,files}) =>
     library.ObjectDetector.createFromOptions(files,{
       baseOptions:{modelAssetPath:`${MODELS}/object_detector/efficientdet_lite0/float16/1/efficientdet_lite0.tflite`},
-      runningMode:'IMAGE',categoryAllowlist:['person'],scoreThreshold:.35,maxResults:35
+      runningMode:'IMAGE',categoryAllowlist:['person','sports ball'],scoreThreshold:.35,maxResults:40
     })).catch(error => {peoplePromise=null;throw error;});
   return ballPromise ||= runtime.then(({library,files}) =>
     library.ObjectDetector.createFromOptions(files,{
@@ -360,6 +360,7 @@ export function coachReview(frames, aspect) {
   const flush=()=>{if(run.length>=4)windows.push(run);run=[];};
   for(const sample of frames) {
     if(!sample.points) {flush();continue;}
+    if(run.length&&sample.time-run.at(-1).time>.2)flush();
     run.push(sample);
     if(run.length===16) flush();
   }

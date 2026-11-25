@@ -3,6 +3,10 @@ import {PlayerLock, coachReview, seekFrame} from '../web/pose.js';
 import {calibratePitch, eventTotals, suggestBallEvents, tacticalZones} from '../web/match.js';
 import {outcomeRate, planFor} from '../web/training.js';
 import worker from '../dist/server/index.js';
+import {sampleAt,reconnectTrack,skillMoments} from '../web/review-flow.js';
+import {ballControl,formationOverview} from '../web/team-tactics.js';
+import {clipNarrationWindow} from '../web/export.js';
+import {openPoseReview,savePoseReview} from '../web/saved-pose.js';
 import {activeCoachingCue,drawBodyOutline,maskContours} from '../web/highlight.js';
 import {assignTrackIds,classifyKit,correctTeam,detectionTiles,kitHistogram,teamShape,teamTimeline} from '../web/team.js';
 
@@ -115,6 +119,57 @@ assert.equal(activeCoachingCue([cue],1.5,{points}),cue);
 assert.equal(activeCoachingCue([cue],1.5,{points:null}),null);
 assert.equal(activeCoachingCue([cue],2,{points}),null);
 
+const oldTrack={frames:[{time:0,points},{time:.125,points:null},{time:4,points}],cues:[{time:.1},{time:4}]};
+const repaired=reconnectTrack(oldTrack,{frames:[{time:2.17,points},{time:2.295,points}],cues:[{time:2.2}]},2.17);
+assert.deepEqual(repaired.frames.map(p=>p.time),[0,.125,2.17,2.295]);
+assert.equal(sampleAt(repaired.frames,2.20).state,'reacquired');
+assert.equal(sampleAt(repaired.frames,1),null);
+const moments=skillMoments('pass',{frames,ballSamples:[
+  {time:.25,ball:[.3,.5],nearYou:true},{time:.5,ball:[.41,.5],nearYou:false},
+]});
+assert.equal(moments[0].time,.25);
+assert.equal(skillMoments('pass',{frames:[],ballSamples:[{time:.25,nearYou:true}]}).length,0);
+assert.deepEqual(clipNarrationWindow(1,2,1.5,2.5),{delay:0,offset:.5,duration:1});
+assert.deepEqual(clipNarrationWindow(3,3,2,4),{delay:1,offset:0,duration:1});
+assert.equal(clipNarrationWindow(5,1,1,4),null);
+const stored=savePoseReview({frames:[
+  {time:1.25,state:'tracked',points,world:points,outline:[[[.2,.1],[.42,.1],[.2,.5]]]},
+  {time:1.375,state:'lost',points:null},
+  {time:2.7,state:'reacquired',points,world:points},
+],cues:[{time:1.25,title:'Movement',category:'Other',feedback:'Review posture.'}]},'pass',1.25,'left');
+const opened=openPoseReview(JSON.parse(JSON.stringify(stored)),4);
+assert.equal(opened.frames.length,3);
+assert.deepEqual(opened.frames[0].outline,[[[.2,.1],[.42,.1],[.2,.5]]]);
+assert.equal(opened.frames[1].state,'lost');
+assert.equal(opened.frames[2].state,'reacquired');
+assert.equal(opened.mode,'pass');
+assert.equal(opened.moment,1.25);
+assert.equal(opened.foot,'left');
+assert.equal(openPoseReview(stored,.5),null);
+
+
+const byRole=Array.from({length:10},(_,i)=>({id:i+1,team:'A',
+  field:[i<4?.27+(i%4)*.005:i<7?.50+(i%3)*.005:.74+(i%3)*.005,.18+(i%4)*.2]}));
+const shape=formationOverview(Array.from({length:5},(_,i)=>({time:i/3,players:byRole})),'right');
+assert.equal(shape[0].shape,'4–3–3');
+assert.equal(shape[1].shape,null);
+const controlPlayers=[
+  {id:1,team:'A',field:[.31,.61],box:[.29,.5,.04,.11]},
+  {id:2,team:'A',field:[.50,.60],box:[.48,.49,.04,.11]},
+  {id:3,team:'B',field:[.67,.61],box:[.65,.5,.04,.11]},
+];
+const possessionSamples=Array.from({length:8},(_,i)=>{
+  const p=i<2?controlPlayers[0]:i<4?controlPlayers[1]:controlPlayers[2];
+  return {time:i/3,players:controlPlayers,ball:i===6||i===7?null:{center:p.field,field:p.field}};
+});
+const control=ballControl(possessionSamples);
+assert.equal(control.links.length,1);
+assert.equal(control.links[0].from,1);
+assert.equal(control.links[0].to,2);
+assert.equal(control.events[1].kind,'turnover');
+assert.ok(control.seconds.unknown>=.65);
+assert.deepEqual(ballControl([{time:0,players:controlPlayers,ball:null},{time:1,players:controlPlayers,ball:null}]).events,[]);
+
 const host='https://fixture.test';
 const api=(path,options={},env={})=>worker.fetch(new Request(host+path,options),env);
 assert.equal((await api('/api/reviews')).status,401);
@@ -173,4 +228,4 @@ const pendingFrame=seekFrame(decoder,2,cancelled.signal);
 cancelled.abort();
 await assert.rejects(pendingFrame,{name:'AbortError'});
 
-console.log('Passed tracking, training, pitch and zone analysis, pass/shot suggestions, kit variants, occlusion recovery, track corrections, body contours, playback cues, review grants, feedback, and revocation.');
+console.log('Passed tracking, training, pitch and zone analysis, pass/shot suggestions, kit variants, occlusion recovery, track corrections, body contours, playback cues, reconnect segments, saved pose recovery, skill suggestions, team tactics, narration timing, review grants, feedback, and revocation.');
