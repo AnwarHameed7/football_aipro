@@ -22,6 +22,31 @@ function colourPatch(ctx,point,radius) {
   return bins;
 }
 
+function torsoPattern(ctx,shoulder,hip) {
+  const {width,height}=ctx.canvas;
+  const dx=(hip.x-shoulder.x)*width,dy=(hip.y-shoulder.y)*height;
+  const points=[];
+  for(const row of [.28,.58,.82])for(const across of [-.20,0,.20]) {
+    points.push([
+      Math.round(shoulder.x*width+dx*row-dy*across),
+      Math.round(shoulder.y*height+dy*row+dx*across),
+    ]);
+  }
+  if(Math.hypot(dx,dy)<13||points.some(([x,y])=>x<1||x>=width-1||y<1||y>=height-1))return null;
+  const xs=points.map(point=>point[0]),ys=points.map(point=>point[1]);
+  const x=Math.min(...xs)-1,y=Math.min(...ys)-1,w=Math.max(...xs)-x+2,h=Math.max(...ys)-y+2;
+  const pixels=ctx.getImageData(x,y,w,h).data;
+  return points.map(([px,py])=>{
+    let r=0,g=0,b=0;
+    for(let j=-1;j<=1;j++)for(let i=-1;i<=1;i++) {
+      const index=((py-y+j)*w+px-x+i)*4;
+      r+=pixels[index];g+=pixels[index+1];b+=pixels[index+2];
+    }
+    const total=Math.max(180,r+g+b);
+    return [r/total,g/total,(r+g+b)/(9*765)];
+  });
+}
+
 export function playerSignature(points,ctx) {
   const p=i=>located(points[i])?points[i]:null;
   const shoulder=midpoint(p(11),p(12)),hip=midpoint(p(23),p(24)),knee=midpoint(p(25),p(26));
@@ -35,7 +60,7 @@ export function playerSignature(points,ctx) {
   const lower=knee?colourPatch(ctx,midpoint(hip,knee),radius):null;
   const socks=knee&&ankle?colourPatch(ctx,midpoint(knee,ankle),radius*.75):null;
   const shape=p(11)&&p(12)?gap(p(11),p(12))/torso:0;
-  return {bins,lower,socks,hip,center,torso,shape};
+  return {bins,lower,socks,hip,center,torso,shape,pattern:torsoPattern(ctx,shoulder,hip)};
 }
 
 export function kitDistance(a,b) {
@@ -44,13 +69,21 @@ export function kitDistance(a,b) {
   return Math.sqrt(Math.max(0,1-shared));
 }
 
-function appearance(a,b) {
-  const lower=a.lower&&b.lower, socks=a.socks&&b.socks;
+function patternDistance(a,b) {
+  if(!a||!b)return 0;
+  const compare=(mirror)=>a.reduce((sum,[r,g,l],i)=>{
+    const [rr,gg,ll]=b[mirror?i+2-2*(i%3):i];
+    return sum+Math.min(1,Math.hypot(r-rr,g-gg)*1.8+Math.abs(l-ll)*.9);
+  },0)/a.length;
+  return Math.min(compare(false),compare(true));
+}
+
+export function appearance(a,b) {
   const shirt=kitDistance(a,b);
-  const shorts=lower?kitDistance({bins:a.lower},{bins:b.lower}):shirt;
-  const legs=socks?kitDistance({bins:a.socks},{bins:b.socks}):shirt;
+  const shorts=a.lower&&b.lower?kitDistance({bins:a.lower},{bins:b.lower}):shirt;
+  const legs=a.socks&&b.socks?kitDistance({bins:a.socks},{bins:b.socks}):shirt;
   const shape=a.shape&&b.shape?Math.abs(a.shape-b.shape):0;
-  return .70*shirt+.23*shorts+.07*legs+.04*Math.min(1,shape);
+  return .67*shirt+.23*shorts+.10*legs+.20*patternDistance(a.pattern,b.pattern)+.04*Math.min(1,shape);
 }
 
 export class PlayerLock {
@@ -58,50 +91,105 @@ export class PlayerLock {
     this.seed=signature;
     this.references=[...references];
     this.last=signature;
+    this.velocity={x:0,y:0};
     this.missing=0;
     this.pending=null;
     this.streak=0;
   }
 
+  predicted() {
+    const ahead=Math.min(this.missing+1,4),fade=this.missing>6?0:1;
+    return {
+      x:this.last.center.x+this.velocity.x*ahead*fade,
+      y:this.last.center.y+this.velocity.y*ahead*fade,
+    };
+  }
+
   rank(people) {
+    const hasMotion=!!this.last.center;
+    const target=hasMotion?this.predicted():this.last.hip;
     return people.map(person=>{
-      const colour=Math.min(...this.references.map(reference=>appearance(reference,person.sig)));
-      const spatial=gap(this.last.hip,person.sig.hip);
-      return {person,colour,spatial,score:colour+Math.min(this.missing?.14:.30,spatial*(this.missing?.35:1.2))};
+      const sig=person.sig;
+      const colour=Math.min(...this.references.map(reference=>appearance(reference,sig)));
+      const spatial=gap(target,sig.center||sig.hip);
+      const scale=this.last.torso&&sig.torso?Math.abs(Math.log(sig.torso/this.last.torso)):0;
+      const continuity=this.missing>6?.24:this.missing>1?.9:2;
+      return {person,colour,spatial,scale,score:colour+Math.min(.35,spatial*continuity)+
+        (this.missing>6?0:Math.min(.14,scale*.13))};
     }).sort((a,b)=>a.score-b.score);
   }
 
   match(people) {
     const [best,second]=this.rank(people);
-    let person=null,state='lost';
-    if(best&&best.colour<(this.missing?.36:.50)&&
-      (!second||second.score-best.score>(this.missing?.10:.05))) {
-      if(!this.missing&&best.spatial<Math.max(.035,Math.min(.16,(this.last.torso||.06)*3))) {
+    const radius=Math.max(.032,Math.min(.15,(this.last.torso||.05)*2.7));
+    const close=best&&best.spatial<radius&&best.scale<.63;
+    const margin=second?second.score-best.score:Infinity;
+    let person=null,state=people.length?'ambiguous':'lost';
+    if(best&&best.colour<(close&&this.missing<=2?.52:.34)&&margin>(close&&this.missing<=2?.038:.085)) {
+      const briefGap=this.missing===1&&best.spatial<Math.min(.024,radius*.45)&&best.scale<.40&&best.colour<.24&&margin>.13;
+      if(close&&(!this.missing||briefGap)) {
         person=best.person;
-        state='tracked';
-        if(best.spatial<.07&&best.colour>.06&&best.colour<.24&&person.sig.lower) {
+        state=briefGap?'reacquired':'tracked';
+        if(!briefGap&&best.spatial<radius*.55&&best.colour>.06&&best.colour<.25&&margin>.11&&person.sig.lower) {
           this.references.push(person.sig);
-          if(this.references.length>5)this.references.splice(1,1);
+          if(this.references.length>8)this.references.splice(1,1);
         }
       } else {
-        const same=this.pending&&appearance(this.pending,best.person.sig)<.27&&gap(this.pending.hip,best.person.sig.hip)<.15;
+        const candidate=best.person.sig;
+        const same=this.pending&&appearance(this.pending,candidate)<.28&&gap(this.pending.hip,candidate.hip)<.15;
         this.streak=same?this.streak+1:1;
-        this.pending=best.person.sig;
+        this.pending=candidate;
         state='checking';
-        if(this.streak>=3){person=best.person;state='reacquired';}
+        const required=close&&this.missing<=3&&best.colour<.22?2:3;
+        if(this.streak>=required){person=best.person;state='reacquired';}
       }
     } else {
       this.pending=null;
       this.streak=0;
     }
     if(person) {
-      this.last=person.sig;
+      const next=person.sig;
+      if(state==='tracked'&&next.center&&this.last.center) {
+        this.velocity={
+          x:.4*this.velocity.x+.6*(next.center.x-this.last.center.x),
+          y:.4*this.velocity.y+.6*(next.center.y-this.last.center.y),
+        };
+      } else this.velocity={x:0,y:0};
+      this.last=next;
       this.missing=0;
       this.pending=null;
       this.streak=0;
     } else this.missing++;
     return {person,state};
   }
+}
+
+export function gapCandidate(people,prior,next,mix) {
+  if(!prior||!next)return null;
+  const bracketDistance=gap(prior.center,next.center);
+  const size=Math.max(.012,Math.min(prior.torso,next.torso));
+  if(bracketDistance>size*2.4||appearance(prior,next)>.30)return null;
+  const expected={x:prior.center.x+(next.center.x-prior.center.x)*mix,
+    y:prior.center.y+(next.center.y-prior.center.y)*mix};
+  const search=Math.max(.012,Math.min(.045,size*.80));
+  const candidates=people.map(person=>({
+    person,distance:gap(expected,person.sig.center),
+    colour:Math.max(appearance(prior,person.sig),appearance(next,person.sig)),
+    scale:Math.abs(Math.log(person.sig.torso/((prior.torso+next.torso)/2))),
+  })).filter(item=>item.distance<search&&item.colour<.34&&item.scale<.55)
+    .map(item=>({...item,score:item.colour+item.distance/search*.23}))
+    .sort((a,b)=>a.score-b.score);
+  const [best,second]=candidates;
+  return best&&(!second||second.score-best.score>.07)?best.person:null;
+}
+
+export function reentryCrop(index,width,height) {
+  const landscape=width>=height;
+  const ratio=Math.max(width,height)/Math.min(width,height);
+  const columns=Math.max(2,Math.ceil(ratio/.6));
+  const along=((index%columns)+.5)/columns;
+  const across=Math.floor(index/columns)%2?.70:.30;
+  return playerCrop(landscape?{x:along,y:across}:{x:across,y:along},.68,width,height);
 }
 
 export function tappedPlayer(people,anchor,width,height,margin=.014) {

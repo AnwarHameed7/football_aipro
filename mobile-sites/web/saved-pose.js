@@ -1,4 +1,4 @@
-const states=['tracked','reacquired','lost','checking'];
+const states=['tracked','reacquired','lost','checking','ambiguous'];
 const MAX_FRAMES=2400;
 const quantize=value=>Number.isFinite(value)?Math.round(Math.max(-15,Math.min(15,value))*2000):0;
 const validTime=(value,duration)=>Number.isFinite(value)&&value>=0&&value<=duration+.05;
@@ -49,7 +49,7 @@ export function openPoseReview(data,duration) {
       if(coordinates.length<6||coordinates.length%2||coordinates.some(v=>v<0||v>1))return [];
       return [Array.from({length:coordinates.length/2},(_,i)=>[coordinates[i*2],coordinates[i*2+1]])];
     }):[];
-    frames.push({time,state:points?(entry[1]===1?'reacquired':'tracked'):(entry[1]===3?'checking':'lost'),
+    frames.push({time,state:points?(entry[1]===1?'reacquired':'tracked'):(entry[1]===3?'checking':entry[1]===4?'ambiguous':'lost'),
       points,world:points?readPoints(entry[3]):null,outline});
   }
   if(!frames.some(frame=>frame.points))return null;

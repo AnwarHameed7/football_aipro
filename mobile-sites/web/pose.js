@@ -1,6 +1,6 @@
 import {maskContours,poseContours} from './highlight.js';
 import {appleMobile,closeModel,objectModel,PlayerSelectionError,PoseEngineError,withPoseFallback} from './pose-engine.js';
-import {kitDistance,mergePlayers,PlayerLock,playerCrop,playerSignature,tappedPlayer,uncropPoint} from './player-selection.js';
+import {gapCandidate,kitDistance,mergePlayers,PlayerLock,playerCrop,playerSignature,reentryCrop,tappedPlayer,uncropPoint} from './player-selection.js';
 export {PlayerLock} from './player-selection.js';
 export const BONES = [[11,12],[11,13],[13,15],[12,14],[14,16],[11,23],[12,24],[23,24],
   [23,25],[25,27],[27,29],[29,31],[24,26],[26,28],[28,30],[30,32]];
@@ -90,7 +90,8 @@ async function scanPose(video,detector,{anchor,start,end,lookForBall,signal,prog
   for(let time=anchor.time-.125;time>=begin-.0001;time-=.125)backward.push(Math.max(0,time));
   const times=[...forward,...backward];
   let lock,origin,last,fast=0,nearby=0,lastBall=-10,lastFast=-10;
-  let poseOutline=false;
+  let poseOutline=false,tile=0;
+  const signatures=new Map();
   const read=async ({crop=null,preferred})=>{
     let people=[];
     if(crop)zoomContext.drawImage(video,crop.x,crop.y,crop.side,crop.side,0,0,zoomed.width,zoomed.height);
@@ -140,14 +141,19 @@ async function scanPose(video,detector,{anchor,start,end,lookForBall,signal,prog
         const near=Math.max(.018,Math.min(.11,lock.last.torso*2));
         const needsZoom=!best||best.colour>.32||best.spatial>near||(second&&second.score-best.score<.08);
         if(needsZoom&&(lock.missing<5||lock.pending||i%4===0)) {
-          const target=lock.pending||lock.last;
+          const target=lock.pending?.center||lock.predicted();
           const side=Math.min(video.videoWidth,video.videoHeight);
-          const zoom=Math.min(.82,Math.max(.18,target.torso*image.height/Math.min(image.width,image.height)*5));
+          const zoom=Math.min(.82,Math.max(.18,lock.last.torso*image.height/Math.min(image.width,image.height)*5));
           if(side>=160) {
-            const crop=playerCrop(target.center,zoom,video.videoWidth,video.videoHeight);
+            const crop=playerCrop(target,zoom,video.videoWidth,video.videoHeight);
             people=mergePlayers(people,await read({crop,preferred}));
           }
         }
+      }
+      if(lock&&lock.missing>=5&&!lock.pending&&i%4===0) {
+        people=mergePlayers(people,await read({
+          crop:reentryCrop(tile++,video.videoWidth,video.videoHeight),preferred,
+        }));
       }
       if(lock)({person:chosen,state}=lock.match(people));
       else {
@@ -169,6 +175,7 @@ async function scanPose(video,detector,{anchor,start,end,lookForBall,signal,prog
         frames.push({time,points:null,world:null,state});
       } else {
         frames.push({time,points:chosen.points,world:chosen.world,outline,state});
+        signatures.set(time,chosen.sig);
         if(!reverse && last && state==='tracked') {
           const s=chosen.sig, motion=Math.hypot(s.hip.x-last.hip.x,s.hip.y-last.hip.y)/s.torso;
           fast=motion>.21 ? fast+1 : 0;
@@ -219,18 +226,53 @@ async function scanPose(video,detector,{anchor,start,end,lookForBall,signal,prog
             feedback:'The detected ball stayed near a visible ankle. Review the clip to confirm the touch.'});
         }
       }
-      if(i%4===0) {progress((i+1)/times.length);await new Promise(r=>setTimeout(r,0));}
+      if(i%4===0) {progress(.90*(i+1)/times.length);await new Promise(r=>setTimeout(r,0));}
     }
   } finally {if(ball)closeModel(ball);}
   if(!origin)throw new PlayerSelectionError();
   const sorted=frames.sort((a,b)=>a.time-b.time);
+  let retried=0,refined=0;
+  for(let i=1;i<sorted.length-1&&retried<24;i++) {
+    if(sorted[i].points||!sorted[i-1].points)continue;
+    const left=sorted[i-1];
+    const stop=Math.min(sorted.length-1,i+3);
+    let j=i;
+    while(j<=stop&&!sorted[j].points)j++;
+    if(j>stop)continue;
+    const right=sorted[j],before=signatures.get(left.time),after=signatures.get(right.time);
+    if(!before||!after||right.time-left.time>.51)continue;
+    for(let k=i;k<j&&retried<24;k++) {
+      signal.throwIfAborted();
+      retried++;
+      const sample=sorted[k],mix=(sample.time-left.time)/(right.time-left.time);
+      const center={x:before.center.x+(after.center.x-before.center.x)*mix,
+        y:before.center.y+(after.center.y-before.center.y)*mix};
+      await seekFrame(video,sample.time,signal);ctx.drawImage(video,0,0,image.width,image.height);
+      const zoom=Math.min(.76,Math.max(.18,Math.max(before.torso,after.torso)*4));
+      const crop=playerCrop(center,zoom,video.videoWidth,video.videoHeight);
+      const preferred=people=>gapCandidate(people,before,after,mix);
+      const candidates=await read({crop,preferred});
+      const candidate=preferred(candidates);
+      if(candidate) {
+        const outline=candidate.outline?.length?candidate.outline:traceContext?poseContours(candidate.points,traceContext):[];
+        poseOutline ||= !candidate.outline?.length&&outline.length>0;
+        Object.assign(sample,{points:candidate.points,world:candidate.world,outline,state:'tracked'});
+        refined++;
+      }
+      if(retried%4===0) {
+        progress(.90+retried/240);
+        await new Promise(resolve=>setTimeout(resolve,0));
+      }
+    }
+    i=j-1;
+  }
   for(let i=0;i<sorted.length;i++) {
     const sample=sorted[i];
-    if(sample.time>=anchor.time-.001||!sample.points)continue;
-    sample.state=i>0&&!sorted[i-1].points?'reacquired':'tracked';
+    if(!sample.points)continue;
+    sample.state=i>0&&!sorted[i-1].points&&sorted[i-1].time<sample.time-.05?'reacquired':'tracked';
   }
   progress(1);
-  return {frames:sorted,cues,ballSamples:ballSamples.sort((a,b)=>a.time-b.time),ballUnavailable,poseOutline,compatibility:detector.compatibility};
+  return {frames:sorted,cues,ballSamples:ballSamples.sort((a,b)=>a.time-b.time),ballUnavailable,poseOutline,refined};
 }
 
 function angle(a,b,c) {
@@ -312,11 +354,12 @@ export function coachReview(frames, aspect) {
   }
   flush();
   const matched=frames.filter(sample=>sample.points).length;
-  const findings=[];
+  const findings=[],moments=[];
   const best={};
   const record=(key,score,span,observation,cue)=>{
-    if(best[key] && best[key].score>=score) return;
-    best[key]={focus:key,score,start:span[0].time,end:span.at(-1).time+.125,observation,cue};
+    const item={focus:key,score,start:span[0].time,end:span.at(-1).time+.125,observation,cue};
+    moments.push(item);
+    if(!best[key]||best[key].score<score)best[key]=item;
   };
   const median=items=>[...items].sort((a,b)=>a-b)[Math.floor(items.length/2)];
   for(const span of windows) {
@@ -355,7 +398,7 @@ export function coachReview(frames, aspect) {
     }
   }
   for(const key of ['trunk','knee','elbow']) if(best[key]) findings.push(best[key]);
-  return {matched,total:frames.length,usableWindows:windows.length,findings};
+  return {matched,total:frames.length,usableWindows:windows.length,findings,moments};
 }
 
 export function attemptReview(frames, time, mode, side, aspect) {

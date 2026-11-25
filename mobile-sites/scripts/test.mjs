@@ -1,11 +1,11 @@
 import assert from 'node:assert/strict';
 import {PlayerLock, attemptReview, coachReview, metrics, seekFrame} from '../web/pose.js';
 import {PlayerSelectionError, PoseEngineError, modelWithin, withPoseFallback} from '../web/pose-engine.js';
-import {mergePlayers, playerCrop, tappedPlayer, uncropPoint} from '../web/player-selection.js';
+import {gapCandidate, mergePlayers, playerCrop, reentryCrop, tappedPlayer, uncropPoint} from '../web/player-selection.js';
 import {calibratePitch, estimateId, eventTotals, suggestBallEvents, tacticalZones, unreviewedEstimates} from '../web/match.js';
 import {outcomeRate, planFor} from '../web/training.js';
 import worker from '../dist/server/index.js';
-import {sampleAt,reconnectTrack,skillMoments} from '../web/review-flow.js';
+import {poseCoverage,sampleAt,reconnectTrack,skillMoments} from '../web/review-flow.js';
 import {ballControl,formationOverview} from '../web/team-tactics.js';
 import {clipNarrationWindow,mixPcmTracks} from '../web/export.js';
 import {openPoseReview,savePoseReview} from '../web/saved-pose.js';
@@ -67,8 +67,8 @@ function kit(bin,x) {
 }
 const lock=new PlayerLock(kit(1,.2).sig);
 assert.equal(lock.match([kit(1,.24)]).state,'tracked');
-assert.equal(lock.match([kit(22,.24)]).state,'lost');
-assert.equal(lock.match([kit(1,.8),kit(1,.78)]).state,'lost');
+assert.equal(lock.match([kit(22,.24)]).state,'ambiguous');
+assert.equal(lock.match([kit(1,.8),kit(1,.78)]).state,'ambiguous');
 assert.deepEqual([.8,.81,.82].map(x=>lock.match([kit(1,x),kit(22,.24)]).state),
   ['checking','checking','reacquired']);
 
@@ -79,6 +79,24 @@ sameShirt.sig.lower=kit(8,.2).sig.bins;
 sameBody.sig.lower=bodyReference.lower;
 const bodyLock=new PlayerLock(bodyReference);
 assert.equal(bodyLock.match([sameShirt,sameBody]).person,sameBody);
+
+const at=(x,bin=1)=> {
+  const person=kit(bin,x);
+  person.sig.center={x,y:.48};
+  person.sig.torso=.045;
+  return person;
+};
+const moving=new PlayerLock(at(.35).sig);
+assert.equal(moving.match([at(.39)]).state,'tracked');
+assert.equal(moving.match([at(.43),at(.37)]).person.sig.center.x,.43);
+assert.equal(moving.match([]).state,'lost');
+assert.equal(moving.match([at(.5,22)]).state,'ambiguous');
+const prior=at(.51).sig,next=at(.54).sig,target=at(.525),wrong=at(.525,22);
+assert.equal(gapCandidate([wrong,target],prior,next,.5),target);
+assert.equal(gapCandidate([at(.53),target],prior,next,.5),null);
+assert.equal(gapCandidate([target],prior,at(.80).sig,.5),null);
+assert.ok(reentryCrop(0,1920,1080).x<reentryCrop(2,1920,1080).x);
+assert.ok(reentryCrop(0,1080,1920).y<reentryCrop(2,1080,1920).y);
 
 const points=Array.from({length:33},()=>({x:.55,y:.3,z:0,visibility:1}));
 points[23]={x:.4,y:.5,z:0,visibility:1};
@@ -92,6 +110,14 @@ points[27]={x:.37,y:.78,z:0,visibility:1};
 points[28]={x:.47,y:.77,z:0,visibility:1};
 assert.ok(metrics(frames[0],1.8).some(([name])=>name==='Left knee (2D)'));
 assert.match(attemptReview(frames,.5,'landing','right',1.8).findings[0].observation,/in the camera view/);
+const coverageExample=poseCoverage([
+  {time:0,points},{time:.125,points:null},{time:.25,points:null},{time:.375,points},
+],.49);
+assert.deepEqual(coverageExample,{start:0,end:.49,matched:2,total:4,gaps:[{start:.125,end:.375}]});
+assert.equal(coachReview(frames,1.8).moments[0].focus,'trunk');
+const uncertainReview=savePoseReview({frames:[{time:0,points,state:'tracked'},
+  {time:.125,points:null,state:'ambiguous'}]},'running',null,'right');
+assert.equal(openPoseReview(uncertainReview,1).frames[1].state,'ambiguous');
 assert.equal(outcomeRate(10,7),70);
 assert.equal(outcomeRate(3,4),null);
 

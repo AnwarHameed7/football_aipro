@@ -66,3 +66,19 @@ export function skillMoments(mode,{frames=[],ballSamples=[],eventSuggestions=[]}
   return options.filter(item=>sampleAt(frames,item.time)?.points&&item.time>=frames[0].time+.16&&
     item.time<=frames.at(-1).time-.16).slice(0,16);
 }
+
+export function poseCoverage(frames,duration) {
+  if(!frames.length)return {matched:0,total:0,start:0,end:0,gaps:[]};
+  const gaps=[];
+  for(const sample of frames) {
+    if(sample.points)continue;
+    const prior=gaps.at(-1),end=Math.min(duration,sample.time+.125);
+    if(prior&&sample.time-prior.end<.05)prior.end=end;
+    else gaps.push({start:sample.time,end});
+  }
+  return {
+    matched:frames.filter(sample=>sample.points).length,total:frames.length,
+    start:frames[0].time,end:Math.min(duration,frames.at(-1).time+.125),
+    gaps:gaps.sort((a,b)=>(b.end-b.start)-(a.end-a.start)),
+  };
+}

@@ -1,5 +1,5 @@
 import {openPoseReview,savePoseReview} from './saved-pose.js';
-import {reconnectTrack,sampleAt,skillMoments} from './review-flow.js';
+import {poseCoverage,reconnectTrack,sampleAt,skillMoments} from './review-flow.js';
 import {activeCoachingCue,drawBodyOutline} from './highlight.js';
 import {teamWorkspace} from './team-ui.js';
 import {analyze,attemptReview,coachReview,drawMovementMap,metrics,render3d,skeleton} from './pose.js';
@@ -424,7 +424,8 @@ function updateTrackBadge(sample) {
   if(selecting) [state,label]=['selecting','Tap your torso in the video'];
   else if(scanJob) [state,label]=['checking','Analyzing your track'];
   else if(sample?.state==='checking') [state,label]=['checking','Checking possible re-entry'];
-  else if(sample && !sample.points) [state,label]=['lost','You’re off-screen or the match is unclear'];
+  else if(sample?.state==='ambiguous') [state,label]=['lost','Can’t confirm which player is you'];
+  else if(sample && !sample.points) [state,label]=['lost','Your body wasn’t detected in this frame'];
   else if(sample?.points) {
     const returned=pose.frames.some(item=>item.state==='reacquired'&&
       item.time<=sample.time&&sample.time-item.time<.65);
@@ -537,7 +538,8 @@ $('scanPose').onclick=async()=>{
     const returns=result.frames.filter(item=>item.state==='reacquired').length;
     status('selectionHelp',returns?`Play for coach feedback. Found you again ${returns} time(s); use Next re-entry to review.`:
       'Track ready. Play the clip to see feedback under the video.');
-    status('poseStatus',`${matched} of ${result.frames.length} samples matched. Ambiguous frames were left as gaps.`+
+    status('poseStatus',`${matched} of ${result.frames.length} samples matched. Unconfirmed frames were left as gaps.`+
+      (result.refined?` Recovered ${result.refined} extra samples on a second pass.`:'')+
       (result.poseOutline?' Outline estimated from visible joints.':'')+
       (result.ballUnavailable?' Ball tracking was unavailable for this scan.':''));
     const selectedFrame=result.frames.find(frame=>frame.points&&frame.time>=anchor.time-.001);
@@ -566,7 +568,7 @@ function poseReport(result) {
   for(let i=0;i<result.frames.length;) {
     const start=i, matched=!!result.frames[i].points, values={};
     while(i<result.frames.length && i-start<16 && (i===start||result.frames[i].time-result.frames[i-1].time<=.2) && !!result.frames[i].points===matched) {
-      for(const [label,value] of metrics(result.frames[i])) (values[label] ||= []).push(value);
+      for(const [label,value] of metrics(result.frames[i],video.videoWidth/video.videoHeight)) (values[label] ||= []).push(value);
       i++;
     }
     const measurements=Object.fromEntries(Object.entries(values).filter(([,samples])=>samples.length>=3)
@@ -841,42 +843,66 @@ $('markMoment').onclick=()=>{
   $('coachPanel').scrollIntoView({block:'start'});
 };
 function renderClipCoaching() {
-  const panel=$('clipCoaching'),list=$('clipCoachingList');
+  const panel=$('clipCoaching'),list=$('clipCoachingList'),gaps=$('clipCoachingGaps');
   panel.hidden=!pose;
-  list.replaceChildren();
+  list.replaceChildren();gaps.replaceChildren();
   if(!pose)return;
   const aspect=video.videoWidth/video.videoHeight;
-  const eventEstimates=suggestBallEvents(pose.ballSamples||[],goalPoints);
+  const coverage=poseCoverage(pose.frames,video.duration);
+  const running=coachReview(pose.frames,aspect);
+  const eventEstimates=currentEstimates();
   const context={frames:pose.frames,ballSamples:pose.ballSamples||[],eventSuggestions:eventEstimates};
-  const reviewed=[];
+  const reviewed=running.findings.map(finding=>({mode:'running',time:finding.start,finding,
+    drill:planFor('running',[finding]).items[0]}));
   for(const mode of ['acceleration','braking','touch','dribble','landing','pass','kick']) {
-    const moments=skillMoments(mode,context);
     const eventKind=mode==='kick'?'shot':mode;
-    const moment=moments.find(({time,label})=>{
-      if(mode==='kick'||mode==='pass') {
-        if(!eventEstimates.some(event=>event.kind===eventKind&&event.time>=time&&event.time-time<.6))return false;
-      }
-      if(mode==='dribble'&&!context.ballSamples.some(sample=>sample.nearYou&&Math.abs(sample.time-time)<.35))return false;
-      return label&&attemptReview(pose.frames,time,mode,$('kickSide').value,aspect).findings.length;
-    });
-    if(!moment)continue;
-    const findings=attemptReview(pose.frames,moment.time,mode,$('kickSide').value,aspect).findings;
-    const finding=skills[mode].foot?findings.find(item=>item.observation.includes('ankles')):findings[0];
-    if(!finding)continue;
-    reviewed.push({mode,moment,finding,drill:planFor(mode,[finding]).items[0]});
+    const estimates=eventEstimates.filter(event=>event.kind===eventKind);
+    const matches=events.filter(event=>event.kind===eventKind&&event.outcome!=='Unclear');
+    const moments=[...matches.map(event=>({time:event.time,confirmed:true})),...skillMoments(mode,context)];
+    let count=0;
+    for(const {time,confirmed} of moments) {
+      if((mode==='kick'||mode==='pass')&&!confirmed&&
+        !estimates.some(event=>event.time>=time&&event.time-time<.6))continue;
+      if(mode==='dribble'&&!confirmed&&
+        !context.ballSamples.some(sample=>sample.nearYou&&Math.abs(sample.time-time)<.35))continue;
+      if(reviewed.some(item=>item.mode===mode&&Math.abs(item.time-time)<1))continue;
+      const {findings}=attemptReview(pose.frames,time,mode,$('kickSide').value,aspect);
+      const finding=skills[mode].foot?findings.find(item=>item.observation.includes('ankles')):findings[0];
+      if(!finding)continue;
+      reviewed.push({mode,time,finding,drill:planFor(mode,[finding]).items[0]});
+      if(++count===2)break;
+    }
   }
-  status('clipCoachingStatus',reviewed.length?
-    'These are suggested moments. Watch each one to check the action and open its full drill.':
-    'The scan did not find enough evidence to suggest another skill moment. You can still select a review type and mark the moment yourself.');
-  for(const {mode,moment,finding,drill} of reviewed.sort((a,b)=>a.moment.time-b.moment.time)) {
+  const pct=Math.round(100*coverage.matched/Math.max(1,coverage.total));
+  status('clipCoachingStatus',`From ${coverage.start.toFixed(1)} to ${coverage.end.toFixed(1)} s, ${pct}% of sampled frames had a confirmed player pose. ${running.usableWindows} usable movement segments. ${reviewed.length} coaching observations.`);
+  const absent=['acceleration','braking','touch','dribble','landing','pass','kick']
+    .filter(mode=>!reviewed.some(item=>item.mode===mode)).map(mode=>skills[mode].label.toLowerCase());
+  status('clipCoachingLimits',(absent.length?`No reliable automatic technique cue for ${absent.join(', ')}. `:'')+
+    'Use a marked moment for crossing, pressing, or off-ball decisions.');
+  const gap=coverage.gaps[0];
+  if(gap&&gap.end-gap.start>=.20)gaps.append(button(`Review tracking gap at ${gap.start.toFixed(1)} s`,()=>{
+    video.pause();seek(gap.start);$('footage').scrollIntoView();
+  }));
+  for(const {mode,time,finding,drill} of reviewed.sort((a,b)=>a.time-b.time)) {
     const item=element('li','');
-    item.append(element('strong',`${skills[mode].label} · ${moment.time.toFixed(2)} s`),
-      element('p',finding.observation));
+    item.append(element('strong',`${skills[mode].label} · ${time.toFixed(2)} s`),
+      element('p',finding.observation),element('p',finding.cue));
     if(drill)item.append(element('p',`${drill.name} · ${drill.work} · ${drill.rest}`));
     item.append(button('Watch and review',()=>{
-      video.pause();$('coachMode').value=mode;markedMoment=moment.time;
-      seek(moment.time);updateCoaching();$('footage').scrollIntoView();
+      video.pause();$('coachMode').value=mode;markedMoment=mode==='running'?null:time;
+      seek(time);updateCoaching();$('footage').scrollIntoView();
     }));
+    list.append(item);
+  }
+  const results=eventTotals(events).filter(item=>item.known);
+  if(results.length)list.append(element('li',
+    'Marked outcomes · '+results.map(item=>`${item.label} ${item.success}/${item.known} successful`).join(' · ')));
+  for(const priority of tacticalPriorities(events)) {
+    const item=element('li','');
+    item.append(element('strong',`${priority.label} · ${priority.unresolved} of ${priority.known} marked outcomes to review`),
+      element('p',priority.cue),button('Watch decision',()=>{
+        video.pause();seek(Math.max(0,priority.time-.5));$('footage').scrollIntoView();
+      }));
     list.append(item);
   }
 }
@@ -887,7 +913,7 @@ function renderCoaching() {
   updateLiveCoach(poseAt(video.currentTime));
   drawMovementMap($('movementMap'),pose?.frames||[]);
   renderTraining();
-  $('shareCoaching').disabled=!coaching;
+  $('shareCoaching').disabled=!pose;
   if(!coaching) {
     status('coachSummary',pose?'Mark a moment in the video to see feedback.':'Select yourself and tap Track me to get feedback on your movement.');
     return;
@@ -917,10 +943,14 @@ function renderCoaching() {
   }
 }
 $('shareCoaching').onclick=async()=>{
-  if(!coaching) return;
+  if(!pose)return;
   const title='Football AI Pro · My coaching';
-  const text=[title,source.name,$('coachSummary').textContent,
-    ...coaching.findings.map(finding=>`${finding.start.toFixed(2)} s — ${finding.observation} ${finding.cue}`)].join('\n\n');
+  const overall=[...$('clipCoachingList').children].map(item=>
+    item.querySelector('strong')?
+      [...item.querySelectorAll('strong,p')].map(element=>element.textContent).join('\n'):item.textContent);
+  const text=[title,source.name,$('clipCoachingStatus').textContent,$('clipCoachingLimits').textContent,...overall,
+    ...($('coachMode').value==='running'?[]:coaching?.findings||[]).map(finding=>
+      `${finding.start.toFixed(2)} s · ${finding.observation} ${finding.cue}`)].join('\n\n');
   if(navigator.share) {
     try {await navigator.share({title,text});return;}
     catch(error){if(error.name==='AbortError') return;}
@@ -1145,6 +1175,7 @@ function renderMatch() {
       button('Remove',()=>{events.splice(index,1);renderMatch();}));
     row.append(actions);list.append(row);
   }
+  if(pose&&ready)renderClipCoaching();
 }
 $('exportEvents').onclick=()=>{
   const rows=[['time_s','action','outcome','source','note'],
@@ -1346,7 +1377,7 @@ function paintSelectedBody(context,rect,sample,outline,showPose) {
 }
 
 function updateLiveCoach(sample) {
-  const time=video.currentTime, findings=coaching?.findings||[];
+  const time=video.currentTime, findings=coaching?.moments||coaching?.findings||[];
   const active=activeCoachingCue(findings,time,sample);
   const panel=$('liveCoach');
   const flag=String(!!active);
@@ -1358,7 +1389,8 @@ function updateLiveCoach(sample) {
   else if(scanFailure) {label='Tracking needs attention';observation=scanFailure;}
   else if(!pose) observation='Select yourself and tap Track me. Feedback appears here as you play the analyzed clip.';
   else if(!sample) observation='This time is outside the analyzed part of the clip.';
-  else if(!sample.points) observation='Your body is off-screen or the match is unclear. Feedback resumes when your track is found.';
+  else if(sample?.state==='ambiguous') observation='Players are visible here, but I can’t confirm which one is you.';
+  else if(!sample.points) observation='I don’t have a usable pose for you at this moment. Feedback resumes when I can confirm your track.';
   else if(active) {
     label=`${active.start.toFixed(1)}–${active.end.toFixed(1)} s`;
     observation=active.observation;cue=active.cue;
@@ -1376,7 +1408,7 @@ function updateLiveCoach(sample) {
   status('liveCue',cue);
 }
 $('nextCoachCue').onclick=()=>{
-  const moments=[...(coaching?.findings||[])].sort((a,b)=>a.start-b.start);
+  const moments=[...(coaching?.moments||coaching?.findings||[])].sort((a,b)=>a.start-b.start);
   const next=moments.find(item=>item.start>video.currentTime+.09)||moments[0];
   if(!next)return;
   video.pause();
