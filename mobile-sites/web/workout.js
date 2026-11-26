@@ -7,6 +7,24 @@ export const exercises={
   running:{title:'Upright running drill',view:'Use a fixed side view. Keep your shoulders and hips visible throughout the drill.'},
   free:{title:'Free movement',view:'Keep the joints you want to review in frame.'},
 };
+export const workoutPractice={
+  squat:'Film three controlled reps from the side and compare the knee angle at the bottom of each rep.',
+  hinge:'Film three slow hinges from the side. Compare the hip angle and how much your knees bend.',
+  lunge:'Film three steps per side. Compare the bottom position and the return to standing.',
+  pushup:'Film three controlled push-ups from a low side angle. Compare the shoulder-to-ankle line through each rep.',
+  plank:'Film a short hold from the side and compare your shoulder-to-ankle line at the start and end.',
+  running:'Film several upright strides at a steady pace from the side. Compare trunk tilt across steps.',
+  free:'Choose a specific exercise for targeted cues, or open a clip that shows the full movement.',
+};
+
+export function workoutSummaryGuide(mode,summary) {
+  if(!summary.coverage)return 'Use a side view with one person and all the joints for this exercise visible.';
+  if(summary.coverage<60)return 'Retake a clearer clip before judging form. Keep the joints needed for this exercise visible through the movement.';
+  if(Object.hasOwn(exercises[mode],'low')&&!summary.reps)
+    return 'Include a steady starting position, the whole bend, and the return before the clip ends.';
+  return workoutPractice[mode];
+}
+
 const sides=[[11,13,15,23,25,27],[12,14,16,24,26,28]];
 const visibility=p=>p&&(p.visibility??1)>=.57&&Number.isFinite(p.x)&&Number.isFinite(p.y)&&
   p.x>=0&&p.x<=1&&p.y>=0&&p.y<=1;

@@ -16,7 +16,8 @@
   <div class="heading"><h1>Review footage</h1><p>Compare technique, mark key moments, and share feedback.</p></div>
   <div class="workspace">
     <section id="footage" class="panel video-panel" aria-label="Video workspace">
-      <div class="pane-header"><h2>Footage</h2><label class="button primary">Open clip<input id="source" type="file" accept="video/*"></label></div>
+      <div class="pane-header"><h2>Football footage</h2><label class="button primary">Open clip<input id="source" type="file" accept="video/*"></label></div>
+      <div class="row"><a href="#coachPanel">Football coaching feedback</a><a href="#workoutPanel">Workout photo or video</a></div>
       <div class="player-controls" aria-label="Select and track yourself">
         <div class="row">
           <button id="choosePlayer" class="primary" type="button" disabled aria-pressed="false">Select me</button>
@@ -240,6 +241,18 @@
       <button id="stopWorkout" type="button" hidden disabled>End workout</button>
     </div>
     <p class="meta" id="workoutSetup"></p>
+    <section class="live-coach workout-feedback" id="workoutFeedback" aria-labelledby="workoutFeedbackTitle">
+      <h3 id="workoutFeedbackTitle">AI Coach feedback</h3>
+      <p id="workoutStatus" role="status">Choose a camera, video, or photo to begin.</p>
+      <p id="workoutCue"></p><p id="workoutMetric"></p>
+      <progress id="workoutProgress" max="1" aria-label="Workout analysis progress" hidden></progress>
+      <div id="workoutSummary" hidden>
+        <h4 id="workoutResultTitle">Workout review</h4>
+        <p id="workoutReview"></p><ul id="workoutFindings"></ul>
+        <p id="workoutNext"></p>
+        <div id="workoutMoments" hidden><h4>Watch key moments</h4><ul id="workoutMomentList"></ul></div>
+      </div>
+    </section>
     <div id="workoutStage" class="workout-stage" hidden>
       <div class="screen workout-screen" id="workoutScreen" hidden>
         <video id="workoutVideo" playsinline muted preload="metadata" aria-label="Workout camera or video"></video>
@@ -257,15 +270,6 @@
         <label class="workout-rotation">Rotate pose <input id="workoutRotation" type="range" min="-180" max="180" step="1" value="20" disabled></label>
         <p class="meta" id="workoutDepthStatus"></p>
       </div>
-    </div>
-    <div class="live-coach workout-feedback" aria-label="Workout form feedback">
-      <p id="workoutStatus" role="status">Choose a camera, video, or photo to begin.</p>
-      <p id="workoutCue"></p><p id="workoutMetric"></p>
-      <progress id="workoutProgress" max="1" aria-label="Workout analysis progress" hidden></progress>
-    </div>
-    <div id="workoutSummary" hidden>
-      <h3>Workout review</h3><p id="workoutReview"></p><ul id="workoutFindings"></ul>
-      <div id="workoutMoments" hidden><h4>Watch key moments</h4><ul id="workoutMomentList"></ul></div>
     </div>
     <details id="workoutHistory" hidden><summary>Recent workouts on this device</summary><ul id="workoutHistoryList"></ul></details>
   </section>

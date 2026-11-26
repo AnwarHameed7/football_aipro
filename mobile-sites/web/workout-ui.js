@@ -1,4 +1,4 @@
-import {exercises,WorkoutCoach} from './workout.js';
+import {exercises,workoutPractice,workoutSummaryGuide,WorkoutCoach} from './workout.js';
 import {modelWithin,withPoseFallback} from './pose-engine.js';
 import {render3d,skeleton} from './pose.js';
 import {changedScene,sceneSample} from './scene.js';
@@ -54,7 +54,7 @@ export function setupWorkout({blocked,onChange}) {
     stop.textContent=kind==='camera'?'End workout':'Cancel analysis';
     analyze.hidden=kind!=='video'&&kind!=='photo';
     analyze.disabled=locked||!ready;
-    analyze.textContent=kind==='photo'?'Analyze photo':'Analyze from playhead';
+    analyze.textContent=kind==='photo'?'Analyze photo':'Analyze video';
     mode.disabled=!!job;
     video.controls=kind==='video'&&!job;
     $('workoutSource').textContent=kind==='camera'?'Live camera':kind==='video'?'Workout video':kind==='photo'?'Workout photo':'No media selected';
@@ -112,6 +112,9 @@ export function setupWorkout({blocked,onChange}) {
     frames=[];
     draw(null);
     $('workoutSummary').hidden=true;
+    $('workoutMoments').hidden=true;
+    $('workoutFindings').replaceChildren();
+    show('workoutNext','');
     show('workoutMetric','');
     show('workoutCue','');
   }
@@ -123,8 +126,8 @@ export function setupWorkout({blocked,onChange}) {
       ready=!!video.videoWidth&&Number.isFinite(video.duration)&&video.duration>0;
       if(ready)positionScreen(video.videoWidth,video.videoHeight);
     }
-    if(ready)show('workoutStatus',kind==='photo'?'Photo ready. Choose the exercise, then analyze.':
-      'Video ready. Choose the exercise and position the playhead where you want the review to start.');
+    if(ready)show('workoutStatus',kind==='photo'?'Photo opened. Choose the exercise, then tap Analyze photo.':
+      'Video opened. Choose the exercise, then tap Analyze video. Review starts at the playhead.');
     refresh();
   }
   function choose() {
@@ -193,6 +196,7 @@ export function setupWorkout({blocked,onChange}) {
   function renderSummary() {
     const summary=coach.summary();
     $('workoutSummary').hidden=false;
+    show('workoutResultTitle',kind==='video'?'Video review':'Workout review');
     const work=coach.mode==='plank'?`${summary.hold} s of aligned hold`:
       Object.hasOwn(exercises[coach.mode],'low')?`${summary.reps} estimated reps`:exercises[coach.mode].title;
     const range=summary.bottomRange;
@@ -208,6 +212,12 @@ export function setupWorkout({blocked,onChange}) {
       item.textContent=`${note.cue} (${note.count} detection${note.count===1?'':'s'})`;
       rows.append(item);
     }
+    if(!summary.notes.length&&summary.coverage>=60) {
+      const item=document.createElement('li');
+      item.textContent='No consistent correction was flagged in the samples reviewed.';
+      rows.append(item);
+    }
+    show('workoutNext','Try next. '+workoutSummaryGuide(coach.mode,summary));
     const moments=kind==='video'?workoutCueMoments(frames):[];
     const reviewList=$('workoutMomentList');
     reviewList.replaceChildren();
@@ -336,9 +346,20 @@ export function setupWorkout({blocked,onChange}) {
           signal.throwIfAborted();
           draw(sample);
           const review=photoWorkoutReview(sample,mode.value);
-          show('workoutStatus',sample.people>1?'Use a photo with one person.':sample.points?'Photo analyzed':'No clear pose found in this photo.');
-          show('workoutMetric',review?`${metricName(mode.value)} ${review.measurement.metric}° in this view`:'');
-          show('workoutCue',review?.cue||(review?'Use a video to review reps, pace, and consistency.':exercises[mode.value].view));
+          show('workoutStatus','Photo analysis complete');
+          show('workoutResultTitle','Photo review');
+          $('workoutSummary').hidden=false;
+          show('workoutReview',review?`${metricName(mode.value)} estimated at ${review.measurement.metric}° in this view.`:
+            sample.people>1?'More than one person was detected. Open a photo of just you.':
+            sample.points?'The pose is visible, but the joints needed for this exercise are unclear.':
+            'No clear pose found. Try a better-lit photo with your full exercise position visible.');
+          if(review?.cue) {
+            const finding=document.createElement('li');
+            finding.textContent=review.cue;
+            $('workoutFindings').append(finding);
+          }
+          show('workoutNext','Try next. '+(review?workoutPractice[mode.value]:exercises[mode.value].view));
+          show('workoutCue',review?'Use a video to review reps, pace, and consistency.':'');
           return;
         }
         coach=new WorkoutCoach(mode.value);
@@ -377,6 +398,7 @@ export function setupWorkout({blocked,onChange}) {
       input.width=input.height=scene.width=scene.height=zoom.width=zoom.height=1;
       finish();
       replay();
+      $('workoutFeedback').scrollIntoView?.({block:'nearest'});
     }
   };
   stop.onclick=stopJob;

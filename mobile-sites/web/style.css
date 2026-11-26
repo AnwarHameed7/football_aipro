@@ -70,3 +70,7 @@ progress{display:block;width:100%;accent-color:var(--mint)}@keyframes appear{fro
   .workout-inputs>*{flex:1 1 auto;text-align:center}
   .workout-source{max-width:8rem}
 }
+.workout-feedback h3{margin:0 0 .4rem}
+#workoutSummary{border-top:1px solid var(--line);padding-top:.65rem}
+#workoutSummary h4{margin:0}
+#workoutNext{color:var(--mint);margin:.5rem 0 0}

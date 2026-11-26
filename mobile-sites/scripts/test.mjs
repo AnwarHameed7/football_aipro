@@ -1,5 +1,5 @@
 import {photoWorkoutReview,readWorkoutFrame,scanWorkoutVideo,workoutCueMoments,workoutFrameAt} from '../web/workout-media.js';
-import {WorkoutCoach,workoutMeasurement} from '../web/workout.js';
+import {WorkoutCoach,workoutMeasurement,workoutSummaryGuide} from '../web/workout.js';
 import {openWorkoutCamera} from '../web/workout-ui.js';
 import {bodyMeasurementReview,measuredEntry,relativeFatMass} from '../web/body-measurements.js';
 import {ballMatchSample,mapCropBall} from '../web/ball-review.js';
@@ -20,6 +20,10 @@ import {openPoseReview,savePoseReview} from '../web/saved-pose.js';
 import {activeCoachingCue,drawBodyOutline,maskContours} from '../web/highlight.js';
 import {assignTrackIds,classifyKit,correctTeam,detectionTiles,kitHistogram,teamShape,teamTimeline} from '../web/team.js';
 
+assert.match(workoutSummaryGuide('squat',{coverage:0,reps:0}),/one person/);
+assert.match(workoutSummaryGuide('squat',{coverage:40,reps:2}),/clearer clip/);
+assert.match(workoutSummaryGuide('squat',{coverage:80,reps:0}),/whole bend/);
+assert.match(workoutSummaryGuide('squat',{coverage:80,reps:2}),/Film three controlled reps/);
 const workoutPose=(style,side=0)=>{
   const points=Array.from({length:33},()=>({x:0,y:0,z:0,visibility:0}));
   const keys=side?[12,14,16,24,26,28]:[11,13,15,23,25,27];
