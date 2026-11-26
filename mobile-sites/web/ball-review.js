@@ -12,7 +12,9 @@ export function ballMatchSample(detections,sample,width,height,context,cut=false
   const balls=detections.flatMap(item=>{
     if(item.categories[0]?.categoryName!=='sports ball'||item.categories[0].score<.48)return [];
     const {originX,originY,width:w,height:h}=item.boundingBox;
-    if(w<=0||h<=0||w>width*.14||h>height*.14)return [];
+    if(w<=0||h<=0||w/h<.45||w/h>2.2)return [];
+    const size=Math.max(w/width,h/height);
+    if(size>.45||(size>.14&&item.categories[0].score<.65))return [];
     const x=(originX+w/2)/width,y=(originY+h/2)/height;
     return x>=0&&x<=1&&y>=0&&y<=1?[{x,y,score:item.categories[0].score}]:[];
   }).sort((a,b)=>b.score-a.score);

@@ -122,7 +122,7 @@ export class PlayerLock {
       const colour=Math.min(...this.references.map(reference=>appearance(reference,sig)));
       const spatial=gap(target,sig.center||sig.hip);
       const scale=this.last.torso&&sig.torso?Math.abs(Math.log(sig.torso/this.last.torso)):0;
-      const continuity=this.missing>6?.24:this.missing>1?.9:2;
+      const continuity=this.acrossCut?0:this.missing>6?.24:this.missing>1?.9:2;
       return {person,colour,spatial,scale,score:colour+Math.min(.35,spatial*continuity)+
         (this.missing>6?0:Math.min(.14,scale*.13))};
     }).sort((a,b)=>a.score-b.score);

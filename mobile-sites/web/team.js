@@ -1,4 +1,5 @@
-import {openDecoder,closeDecoder,seekFrame,playerDetector} from './pose.js';
+import {openDecoder,closeDecoder,seekFrame} from './pose.js';
+import {closeModel,objectModel} from './pose-engine.js';
 
 export const TEAM_STEP=.333333;
 export const TEAM_COLORS={A:'#b1f58b',B:'#71c8ff'};
@@ -218,7 +219,6 @@ function boxes(detector,canvas,tile,wide) {
 }
 
 export async function scanTeams({url,sourceVideo,anchors,project,start,end,wide,signal,progress}) {
-  const detector=await playerDetector();
   signal.throwIfAborted();
   const video=sourceVideo||await openDecoder(url,signal);
   const canvas=document.createElement('canvas'),tile=document.createElement('canvas');
@@ -227,9 +227,12 @@ export async function scanTeams({url,sourceVideo,anchors,project,start,end,wide,
   const ctx=canvas.getContext('2d',{willReadFrequently:true});
   const references={};
   const stop=Math.min(end,video.duration-.004,start+90);
-  if(stop<start) {if(!sourceVideo)closeDecoder(video);throw new Error('Choose an interval inside the clip.');}
   const frames=[];
+  let detector;
   try {
+    if(stop<start)throw new Error('Choose an interval inside the clip.');
+    detector=await objectModel('people',signal);
+    signal.throwIfAborted();
     for(const team of ['A','B']) {
       const samples=Array.isArray(anchors[team])?anchors[team]:[anchors[team]];
       references[team]=[];
@@ -265,6 +268,10 @@ export async function scanTeams({url,sourceVideo,anchors,project,start,end,wide,
       progress((time-start)/Math.max(.334,stop-start));
       await new Promise(resolve=>setTimeout(resolve,0));
     }
-  } finally {if(!sourceVideo)closeDecoder(video);}
+  } finally {
+    if(detector)closeModel(detector);
+    for(const surface of [canvas,tile]){surface.width=1;surface.height=1;}
+    if(!sourceVideo)closeDecoder(video);
+  }
   return frames;
 }

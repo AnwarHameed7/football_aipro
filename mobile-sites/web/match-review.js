@@ -59,6 +59,8 @@ async function transact(mode,operate) {
 
 const sectionKey=(key,session,index)=>`${key}:${session.id}:${index}`;
 export const readMatch=key=>transact('readonly',store=>store.get(key));
+export const readMatchNotes=key=>transact('readonly',store=>store.get(`${key}:notes`));
+export const saveMatchNotes=(key,notes)=>transact('readwrite',store=>store.put(notes,`${key}:notes`));
 export const readSection=(key,session,index)=>transact('readonly',store=>store.get(sectionKey(key,session,index)));
 
 export const startMatch=(key,session,previous)=>transact('readwrite',store=>{
@@ -118,14 +120,17 @@ export function ballProgress(session) {
       summary.observed+=part.ball.observed;
       summary.tried+=part.ball.tried;
       summary.eligible+=part.ball.eligible;
+      if(shouldRetryBall(part))summary.retry++;
     }
     return summary;
-  },{ready:0,sections:0,observed:0,tried:0,eligible:0});
+  },{ready:0,sections:0,observed:0,tried:0,eligible:0,retry:0});
 }
 
-export async function scanSavedBallSections({session,duration,signal,load,scan,save,onSection}) {
+const shouldRetryBall=part=>part.ball&&!part.ball.detail&&!part.ball.observed&&part.ball.eligible>=2;
+
+export async function scanSavedBallSections({session,duration,signal,load,scan,save,onSection,detail=false}) {
   let current=session;
-  const pending=Object.values(session.parts).filter(part=>part.matched&&!part.ball)
+  const pending=Object.values(session.parts).filter(part=>part.matched&&(detail?shouldRetryBall(part):!part.ball))
     .sort((a,b)=>a.index-b.index);
   for(const part of pending) {
     signal.throwIfAborted();
@@ -133,7 +138,7 @@ export async function scanSavedBallSections({session,duration,signal,load,scan,s
     if(!record?.pose)throw new Error('A saved pose section is missing. Reconnect in that section and scan it again.');
     const {samples,...ball}=await scan(record,part.index,sectionRange(part.index,duration));
     signal.throwIfAborted();
-    const next={...current,parts:{...current.parts,[part.index]:{...part,ball}}};
+    const next={...current,parts:{...current.parts,[part.index]:{...part,ball:{...ball,detail}}}};
     const amended={...record,ballSamples:samples};
     await save(next,part.index,amended);
     current=next;

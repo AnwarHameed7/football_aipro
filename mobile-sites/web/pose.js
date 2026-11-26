@@ -5,10 +5,7 @@ import {gapCandidate,kitDistance,mergePlayers,PlayerLock,playerCrop,playerSignat
 export {PlayerLock} from './player-selection.js';
 export const BONES = [[11,12],[11,13],[13,15],[12,14],[14,16],[11,23],[12,24],[23,24],
   [23,25],[25,27],[27,29],[29,31],[24,26],[26,28],[28,30],[30,32]];
-let peoplePromise;
 const visible = point => point && (point.visibility ?? 1) >= .55;
-export const playerDetector=()=>peoplePromise ||= objectModel('people')
-  .catch(error=>{peoplePromise=null;throw error;});
 
 function average(a,b) { return {x:(a.x+b.x)/2,y:(a.y+b.y)/2}; }
 function mediaEvent(video,{success,signal,timeout=4500,message,action}) {
@@ -164,7 +161,8 @@ async function scanPose(video,detector,{anchor,start,end,lookForBall,signal,prog
         const [best,second]=lock.rank(people);
         const near=Math.max(.018,Math.min(.11,lock.last.torso*2));
         const needsZoom=!best||best.colour>.32||best.spatial>near||(second&&second.score-best.score<.08);
-        if(needsZoom&&(lock.missing<5||lock.pending||i%4===0)) {
+        if(needsZoom&&(!memory?.referenceSearch||!lock.acrossCut||lock.pending)&&
+          (lock.missing<5||lock.pending||i%4===0)) {
           const target=lock.pending?.center||lock.predicted();
           const side=Math.min(video.videoWidth,video.videoHeight);
           const zoom=Math.min(.82,Math.max(.18,lock.last.torso*image.height/Math.min(image.width,image.height)*5));
@@ -174,7 +172,7 @@ async function scanPose(video,detector,{anchor,start,end,lookForBall,signal,prog
           }
         }
       }
-      if(lock&&lock.missing>=5&&!lock.pending&&i%4===0) {
+      if(lock&&lock.missing>=5&&!lock.pending&&i%(memory?.referenceSearch?2:4)===0) {
         people=mergePlayers(people,await read({
           crop:reentryCrop(tile++,video.videoWidth,video.videoHeight),preferred,
         }));

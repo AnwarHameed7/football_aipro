@@ -1,9 +1,10 @@
-import {LONG_CLIP_SECONDS,SECTION_SECONDS,ballProgress,matchKey,matchProgress,nextSection,readMatch,readSection,
-  saveSection,scanSavedBallSections,scanSections,sectionAt,sectionRange,startMatch} from './match-review.js';
+import {LONG_CLIP_SECONDS,SECTION_SECONDS,ballProgress,matchKey,matchProgress,nextSection,readMatch,readMatchNotes,readSection,
+  saveMatchNotes,saveSection,scanSavedBallSections,scanSections,sectionAt,sectionRange,startMatch} from './match-review.js';
 import {openPoseReview,savePoseReview} from './saved-pose.js';
 import {poseCoverage,reconnectTrack,sampleAt,skillMoments} from './review-flow.js';
 import {closeModel,objectModel,withPoseFallback} from './pose-engine.js';
 import {analyzeSectionBall} from './ball-review.js';
+import {loadPlayerReference,referenceMemory,savePlayerReference,suggestedAnchor} from './player-reference.js';
 import {activeCoachingCue,drawBodyOutline} from './highlight.js';
 import {teamWorkspace} from './team-ui.js';
 import {analyze,attemptReview,coachReview,drawMovementMap,metrics,render3d,skeleton} from './pose.js';
@@ -20,6 +21,7 @@ let weekly=[],outcomes=[],currentPlan=null,activeTeam=null,team=null;
 let dismissedEstimates=[];
 let pitch=[],pendingPitch=null,events=[],matchSamples=[],goalPoints=[],pendingGoal=null,ballSamples=[];
 let anchor, selecting=false, pose=null, coaching=null, markedMoment=null, scanJob=null, scanFailure=null, scanMessage='', exportJob=null, recording=null, voiceDraft='';
+let playerReference=loadPlayerReference(),referenceSuggestion=null,notesRevision=0,longNotesLoading=false;
 let longSession=null,longKey=null,longReady=null,longIndex=null,longAll=false,longReplace=false,longOverride=null,longReading=null;
 const longClip=()=>ready&&video.duration>LONG_CLIP_SECONDS;
 const hasChanges=()=>tags.length || Object.values(marks).some(items=>items.length) || voiceDraft || report || pitch.length || events.length || team?.hasWork();
@@ -47,7 +49,7 @@ const allowReplace=()=>!hasChanges() || confirm('Replace the current work in thi
 function loadSource(file, replace=true) {
   if (replace && !allowReplace()) return false;
   scanGeneration++;scanJob?.abort(); exportJob?.abort(); stopVoice(true);
-  ready = false;scanFailure=null;scanMessage='';
+  ready = false;scanFailure=null;scanMessage='';referenceSuggestion=null;notesRevision=0;longNotesLoading=false;
   longSession=longKey=longReady=longIndex=longOverride=longReading=null;longAll=longReplace=false;renderLongReview();
   clearExportPreview();
   team?.reset();
@@ -89,10 +91,13 @@ video.onloadedmetadata = () => {
   $('controls').disabled = $('tags').disabled = !ready;
   for (const id of ['saveLibrary','exportClip','scanPose','choosePlayer']) $(id).disabled=!ready;
   status('videoStatus', ready ? source.name : 'Could not read this clip. Try an MP4 file.');
+  if(longClip()&&!longReady) {
+    longNotesLoading=true;
+    longReady=prepareLongReview(source);
+  }
   updateTargetControls();
   renderMatch();
   paint();
-  if(longClip()&&!longReady)longReady=prepareLongReview(source);
 };
 video.onerror = () => {
   scanJob?.abort();
@@ -237,22 +242,8 @@ canvas.onpointerup = event => {
   if(pendingPitch) {markPitchPoint(x,y);return;}
   if(pendingGoal) {markGoalPoint(x,y);return;}
   if(selecting) {
-    anchor={x,y,time:Math.min(video.currentTime,video.duration-.001)};scanFailure=null;scanMessage='';
-    const wasReconnect=reconnecting;
-    previousPose=!longClip()&&wasReconnect?pose:null;
-    if(longClip()) {
-      longOverride=anchor;
-      longReplace=!wasReconnect;
-      longAll=false;
-    }
-    reconnecting=false;
-    pose=null;coaching=null;markedMoment=null;matchSamples=[];ballSamples=[];renderCoaching();renderMatch();
-    $('candidates').replaceChildren();
-    selecting=false; updateCanvasMode(); updateTargetControls();
-    status('selectionHelp',previousPose?'Reconnect point marked. Keeping the earlier track and rescanning from here.':
-      'Selection marked. Checking this player and nearby frames.');
-    status('poseStatus',`Player selected at ${anchor.time.toFixed(2)} s.`);
-    paint();updatePosePanel();$('scanPose').click();return;
+    startPlayerSelection({x,y,time:Math.min(video.currentTime,video.duration-.001)});
+    return;
   }
   if (pendingFrame !== frame()) pending = [];
   pendingFrame = frame(); pending.push([x,y]);
@@ -263,6 +254,24 @@ canvas.onpointerup = event => {
   status('videoStatus', pending.length ? `${tools[tool]-pending.length} point(s) left` : `${tool} added to frame ${frame()+1}.`);
   paint();
 };
+function startPlayerSelection(selection) {
+  anchor=selection;referenceSuggestion=null;scanFailure=null;scanMessage='';
+  const wasReconnect=reconnecting;
+  previousPose=!longClip()&&wasReconnect?pose:null;
+  if(longClip()) {
+    longOverride=anchor;
+    longReplace=!wasReconnect;
+    longAll=false;
+  }
+  reconnecting=false;
+  pose=null;coaching=null;markedMoment=null;matchSamples=[];ballSamples=[];renderCoaching();renderMatch();
+  $('candidates').replaceChildren();
+  selecting=false; updateCanvasMode(); updateTargetControls();
+  status('selectionHelp',previousPose?'Reconnect point marked. Keeping the earlier track and rescanning from here.':
+    'Selection marked. Checking this player and nearby frames.');
+  status('poseStatus',`Player selected at ${anchor.time.toFixed(2)} s.`);
+  paint();updatePosePanel();$('scanPose').click();
+}
 $('undo').onclick = () => { if (pending.length) pending.pop(); else marks[frame()]?.pop(); paint(); };
 $('image').onclick = () => {
   if (video.readyState < 2) return;
@@ -424,19 +433,77 @@ function updateTargetControls() {
   $('reconnectMe').hidden=(!pose&&!longSession)||!!scanJob;
   $('markMoment').disabled=!pose||!!scanJob;
   $('saveOutcome').disabled=!ready;
+  renderPlayerReference();
   renderLongReview();
 }
 
+function renderPlayerReference(message) {
+  const busy=!!scanJob;
+  $('savePlayerReference').disabled=busy||!pose?.forwardMemory;
+  $('findPlayerReference').disabled=busy||!ready||!playerReference||!!pose||!!longSession;
+  $('acceptPlayerReference').hidden=$('discardPlayerReference').hidden=!referenceSuggestion||busy;
+  $('forgetPlayerReference').hidden=!playerReference;
+  $('forgetPlayerReference').disabled=busy;
+  if(message)status('playerReferenceStatus',message);
+  else if(referenceSuggestion)status('playerReferenceStatus','Check the amber marker. Use the suggestion only if it marks you.');
+  else status('playerReferenceStatus',playerReference?
+    'A kit and body reference is saved in this browser. Look for it in a clip with a similar kit.':
+    'Track yourself first to save a kit and body reference for future clips in this browser.');
+}
+$('savePlayerReference').onclick=()=>{
+  if(!pose?.forwardMemory||scanJob)return;
+  try {playerReference=savePlayerReference(localStorage,pose.forwardMemory);renderPlayerReference('Player reference saved in this browser.');}
+  catch(error){renderPlayerReference(error.message);}
+};
+$('forgetPlayerReference').onclick=()=>{
+  if(scanJob)return;
+  try {
+    playerReference=savePlayerReference(localStorage,null);referenceSuggestion=null;
+    renderPlayerReference('Player reference cleared.');paint();
+  } catch {renderPlayerReference('This browser could not clear the player reference.');}
+};
+$('discardPlayerReference').onclick=()=>{referenceSuggestion=null;renderPlayerReference();paint();};
+$('acceptPlayerReference').onclick=()=>{
+  if(!ready||scanJob||!referenceSuggestion)return;
+  reconnecting=false;
+  startPlayerSelection(referenceSuggestion);
+};
+$('findPlayerReference').onclick=async()=>{
+  if(!ready||scanJob||!playerReference||pose||longSession||team?.isScanning())return;
+  const job=new AbortController(),clip=source,position=video.currentTime;
+  const start=Math.max(0,Math.min(position,video.duration-1.75)),end=Math.min(video.duration,start+2);
+  referenceSuggestion=null;selecting=false;updateCanvasMode();
+  beginScan(job,'Looking for your saved player reference…');
+  let message;
+  try {
+    await primeDecoder(clip,job.signal);
+    const result=await analyze({sourceVideo:video,anchor:{x:.5,y:.5,time:start},start,end,compact:true,
+      memory:referenceMemory(playerReference),lookForBall:false,signal:job.signal,
+      progress:value=>drawScanProgress('Looking for a possible player',value)});
+    if(source!==clip)return;
+    referenceSuggestion=suggestedAnchor(result.frames);
+    if(!referenceSuggestion)message='No clear match was found here. Move to a clearer moment or tap Select me.';
+  } catch {
+    if(source===clip)message=job.signal.aborted?'Player search paused.':'Could not compare the saved reference. Use Select me to continue.';
+  } finally {
+    if(source===clip)seek(referenceSuggestion?.time??position);
+    finishScan();
+    renderPlayerReference(source===clip?message:undefined);
+    paint();
+  }
+};
+
 function drawTarget(ctx,rect,sample) {
-  if(sample?.points) return;
-  if(!anchor || pose || selecting || Math.abs(video.currentTime-anchor.time)>.075) return;
-  const x=rect.x+anchor.x*rect.w,y=rect.y+anchor.y*rect.h;
+  const preview=referenceSuggestion&&Math.abs(video.currentTime-referenceSuggestion.time)<.10;
+  const target=preview?referenceSuggestion:anchor;
+  if(!target||selecting||(!preview&&(sample?.points||pose))||Math.abs(video.currentTime-target.time)>.10)return;
+  const x=rect.x+target.x*rect.w,y=rect.y+target.y*rect.h;
   ctx.save();
   ctx.strokeStyle='#102418';ctx.lineWidth=7;
   ctx.beginPath();ctx.arc(x,y,15,0,Math.PI*2);ctx.stroke();
-  ctx.strokeStyle='#b1f58b';ctx.lineWidth=3;
+  ctx.strokeStyle=preview?'#ffd960':'#b1f58b';ctx.lineWidth=3;
   ctx.beginPath();ctx.arc(x,y,15,0,Math.PI*2);ctx.stroke();
-  ctx.fillStyle='#b1f58b';ctx.beginPath();ctx.arc(x,y,4,0,Math.PI*2);ctx.fill();
+  ctx.fillStyle=preview?'#ffd960':'#b1f58b';ctx.beginPath();ctx.arc(x,y,4,0,Math.PI*2);ctx.fill();
   ctx.restore();
 }
 
@@ -445,6 +512,7 @@ function updateTrackBadge(sample) {
   let state,label;
   if(selecting) [state,label]=['selecting','Tap your torso in the video'];
   else if(scanJob) [state,label]=['checking','Analyzing your track'];
+  else if(referenceSuggestion&&Math.abs(video.currentTime-referenceSuggestion.time)<.10) [state,label]=['checking','Possible match · confirm above'];
   else if(sample?.state==='checking') [state,label]=['checking','Checking possible re-entry'];
   else if(sample?.state==='ambiguous') [state,label]=['lost','Can’t confirm which player is you'];
   else if(sample && !sample.points) [state,label]=['lost','Your body wasn’t detected in this frame'];
@@ -462,7 +530,7 @@ function updateTrackBadge(sample) {
 }
 $('choosePlayer').onclick=()=>{
   if(!ready) return;
-  reconnecting=false;
+  reconnecting=false;referenceSuggestion=null;
   video.pause();pending=[];pendingPitch=null;pendingGoal=null;team?.cancelPick();selecting=!selecting;
   if(selecting) {
     $('tool').value='Pointer';
@@ -497,6 +565,7 @@ function updatePosePanel() {
 $('rotation').oninput=updatePosePanel;
 $('showPose').onchange=paint;
 $('showOutline').onchange=paint;
+$('ballCues').onchange=renderLongReview;
 let drag;
 $('model3d').onpointerdown=event=>{
   drag={x:event.clientX,rotation:Number($('rotation').value)};
@@ -518,15 +587,19 @@ function renderLongReview() {
   const select=$('reviewMatchSection'),action=$('scanMatch');
   const coverage=matchProgress(longSession,video.duration),balls=ballProgress(longSession);
   const next=longSession?nextSection(longSession,video.duration):null;
-  action.disabled=!!scanJob||!longKey||next===null||!coverage.count;
+  const pendingBall=$('ballCues').checked&&balls.sections<balls.ready;
+  action.disabled=!!scanJob||!longKey||(!pendingBall&&next===null)||!coverage.count;
   const ballAction=$('scanMatchBall');
   ballAction.disabled=!!scanJob||!longKey||balls.ready===balls.sections;
+  $('retryMatchBall').hidden=!balls.retry;
+  $('retryMatchBall').disabled=!!scanJob||!longKey;
   ballAction.textContent=balls.sections&&balls.ready===balls.sections?'Ball scan complete':
     balls.sections?'Continue ball scan':'Scan ball in reviewed sections';
   status('longBallProgress',balls.sections?
     `${balls.sections}/${balls.ready} pose sections checked for ball movement. Ball visible in ${balls.observed}/${balls.tried} sampled frames with a matched player.`:
-    'After saving pose sections, run a separate ball scan to review possible touches and passes.');
-  action.textContent=next===null&&coverage.count?'Match scan complete':coverage.count>1?'Continue match scan':'Scan rest of match';
+    'Full match review saves pose sections first, then checks the ball if ball cues are enabled.');
+  action.textContent=next===null&&coverage.count&&!pendingBall?'Match review complete':
+    next===null||coverage.count>1?'Continue match review':'Review full match';
   const parts=Object.values(longSession?.parts||{}).sort((a,b)=>a.index-b.index);
   select.replaceChildren(new Option('Choose a section',''));
   for(const part of parts) {
@@ -556,9 +629,11 @@ function displayLongSection(index,result,jump=true) {
 }
 async function prepareLongReview(clip) {
   try {
-    const key=await matchKey(clip),saved=await readMatch(key);
+    const key=await matchKey(clip);
+    const [saved,notes]=await Promise.all([readMatch(key),readMatchNotes(key)]);
     if(source!==clip)return;
     longKey=key;
+    if(notes&&notesRevision===0){restoreMatchNotes(notes);renderMatch();}
     if(saved)longSession=saved;
     if(saved&&!anchor) {
       anchor=saved.anchor;
@@ -570,12 +645,14 @@ async function prepareLongReview(clip) {
     }
   } catch {
     if(source===clip){longKey=null;status('videoStatus','Browser storage is unavailable. Single sections can still be reviewed.');}
-  } finally {if(source===clip)updateTargetControls();}
+  } finally {
+    if(source===clip){longNotesLoading=false;updateTargetControls();renderMatch();}
+  }
 }
 function restoreSection(record) {
   if(!record)return null;
   const restored=openPoseReview(record.pose,video.duration);
-  return restored?{...restored,ballSamples:record.ballSamples}:null;
+  return restored?{...restored,ballSamples:record.ballSamples,forwardMemory:record.forwardMemory}:null;
 }
 async function loadLongSection(index,jump) {
   const clip=source,session=longSession;
@@ -612,6 +689,7 @@ async function runLongReview(clip,signal,scan,onRetry) {
     longReplace=false;
   }
   const key=longKey,duration=video.duration;
+  if(all&&nextSection(longSession,duration)===null)return;
   let visible=null;
   await withPoseFallback(engine=>scanSections({session:longSession,duration,
     index:all?nextSection(longSession,duration):index,all,anchorOverride:all?null:longOverride||anchor,signal,
@@ -637,7 +715,7 @@ async function runLongReview(clip,signal,scan,onRetry) {
   displayLongSection(visible.part,visible.result);
   const next=nextSection(longSession,video.duration);
   status('poseStatus',key?(next===null?'Whole match scanned. Open a reviewed section to replay its outline and feedback.':
-    'Section saved on this device. Scan the rest of the match when you’re ready.'):'Section analyzed. Browser storage is unavailable.');
+    'Section saved on this device. Select Review full match to continue.'):'Section analyzed. Browser storage is unavailable.');
 }
 
 function beginScan(job,message) {
@@ -677,17 +755,17 @@ function drawScanProgress(message,value) {
   status('poseStatus',scanMessage);updateLiveCoach(null);
 }
 
-$('scanMatchBall').onclick=async()=>{
-  if(!ready||scanJob||!longKey||!longSession||team?.isScanning())return;
-  const job=new AbortController(),clip=source,key=longKey,position=video.currentTime;
-  const signal=job.signal;
-  beginScan(job,'Opening the ball detector…');
+async function reviewSavedBall(clip,signal,detail=false) {
+  const key=longKey,position=video.currentTime;
+  const coverage=ballProgress(longSession);
+  if(!key||!longSession||(detail?!coverage.retry:coverage.sections===coverage.ready))return;
+  scanMessage='Opening the ball detector…';
+  status('poseStatus',scanMessage);updateLiveCoach(null);
   let detector,display,message;
   try {
-    await primeDecoder(clip,signal);
-    detector=await objectModel('people',signal);
+    detector=await objectModel(detail?'ball-detail':'people',signal);
     await scanSavedBallSections({
-      session:longSession,duration:video.duration,signal,
+      session:longSession,duration:video.duration,signal,detail,
       load:(session,index)=>readSection(key,session,index),
       save:(session,index,record)=>saveSection(key,session,index,record),
       scan:async (record,index,range)=>{
@@ -705,7 +783,8 @@ $('scanMatchBall').onclick=async()=>{
         renderLongReview();
       },
     });
-    message='Ball scan complete for the saved sections. Open a reviewed section to see its ball candidates.';
+    message=detail?'Detailed ball retry complete. Open a reviewed section to see any new candidates.':
+      'Ball scan complete for the saved sections. Open a reviewed section to see its ball candidates.';
   } catch(error) {
     message=signal.aborted?'Ball scan paused. Completed sections are saved.':
       `Ball scan could not finish. ${error.message} Your pose review is still available.`;
@@ -713,13 +792,24 @@ $('scanMatchBall').onclick=async()=>{
     if(detector)closeModel(detector);
     if(source===clip) {
       if(display)displayLongSection(display.index,restoreSection(display.record),false);
-      status('selectionHelp',message);
-      status('poseStatus',message);
-      seek(position);
+      status('selectionHelp',message);status('poseStatus',message);seek(position);
     }
-    finishScan();
   }
-};
+}
+
+async function startBallReview(detail) {
+  if(!ready||scanJob||!longKey||!longSession||team?.isScanning())return;
+  const job=new AbortController(),clip=source;
+  beginScan(job,'Opening video frames…');
+  try {
+    await primeDecoder(clip,job.signal);
+    await reviewSavedBall(clip,job.signal,detail);
+  } catch(error) {
+    if(source===clip)status('selectionHelp',error.message);
+  } finally {finishScan();}
+}
+$('scanMatchBall').onclick=()=>startBallReview(false);
+$('retryMatchBall').onclick=()=>startBallReview(true);
 
 $('stopPose').onclick=$('stopTrackHere').onclick=()=>scanJob?.abort();
 $('scanPose').onclick=async()=>{
@@ -745,7 +835,9 @@ $('scanPose').onclick=async()=>{
         drawScanProgress(index===undefined?'Analyzing selected player':`Section starting at ${matchTime(index*SECTION_SECONDS)}`,value);
       },...options});
     if(longClip()&&(longAll||!inRange||(last+1-first)/fps()>SECTION_SECONDS)) {
+      const runBall=longAll&&$('ballCues').checked;
       await runLongReview(clip,job.signal,run,onRetry);
+      if(runBall&&source===clip&&!job.signal.aborted)await reviewSavedBall(clip,job.signal);
       return;
     }
     if(longClip()) {longReplace=false;longOverride=null;}
@@ -1295,7 +1387,7 @@ function markPitchPoint(x,y) {
   }
   const candidate=pendingPitch;pendingPitch=null;
   if(calibratePitch(candidate)) {
-    pitch=candidate;status('videoStatus','Pitch corners saved. Open Match to see your map.');
+    pitch=candidate;rememberMatchNotes();status('videoStatus','Pitch corners saved. Open Match to see your map.');
   } else status('videoStatus','Could not line up the corners. Tap them in order around the pitch.');
   updateCanvasMode();renderMatch();paint();
 }
@@ -1344,15 +1436,38 @@ $('eventForm').onsubmit=event=>{
     status('matchStatus','You already logged that action at this time.');return;
   }
   events.push({kind,time:stamp,outcome,note:$('eventNote').value.trim()});
+  rememberMatchNotes();
   $('eventNote').value='';renderMatch();
-  status('matchStatus','Event added. Save the review to keep it.');
+  status('matchStatus',longClip()&&longKey?'Saving event on this device…':'Event added. Save the review to keep it.');
 };
-function restoreMatch(data) {
+async function rememberMatchNotes() {
+  if(!longClip()||!longReady)return;
+  notesRevision++;
+  const clip=source,revision=notesRevision;
+  await longReady;
+  if(source!==clip||revision!==notesRevision||!longKey)return;
+  try {
+    await saveMatchNotes(longKey,{pitch,goalPoints,dismissedEstimates,events,attack:$('attackDirection').value});
+    if(source===clip&&revision===notesRevision&&$('matchStatus').textContent==='Saving event on this device…')
+      status('matchStatus','Event saved with this match on this device.');
+  } catch {
+    if(source===clip)status('matchStatus','Could not save match notes in this browser. Download the review to keep them.');
+  }
+}
+
+function restoreMatchNotes(data) {
   pitch=calibratePitch(data?.pitch)?data.pitch:[];
   dismissedEstimates=Array.isArray(data?.dismissedEstimates)?data.dismissedEstimates.filter(id=>
     typeof id==='string'&&/^(pass|shot):\d+$/.test(id)).slice(0,250):[];
   goalPoints=goalArea(data?.goalPoints)?data.goalPoints:[];
   $('attackDirection').value=data?.attack==='left'?'left':'right';
+  events=Array.isArray(data?.events)?data.events.filter(item=>item&&Object.hasOwn(eventKinds,item.kind)&&
+    eventKinds[item.kind].results.includes(item.outcome)&&Number.isFinite(item.time)&&item.time>=0&&
+    item.time<=video.duration&&typeof item.note==='string').slice(0,1000):[];
+}
+
+function restoreMatch(data) {
+  restoreMatchNotes(data);
   ballSamples=Array.isArray(data?.ballSamples)?data.ballSamples.filter(sample=>sample&&
     Number.isFinite(sample.time)&&sample.time>=0&&sample.time<=video.duration&&
     (sample.ball===null||Array.isArray(sample.ball)&&sample.ball.length===2&&
@@ -1361,16 +1476,14 @@ function restoreMatch(data) {
     ['similar','unknown'].includes(sample.receiver.team)))).slice(0,721):[];
   matchSamples=Array.isArray(data?.samples)?data.samples.filter(point=>Array.isArray(point)&&
     point.length===2&&point.every(value=>Number.isFinite(value)&&value>=0&&value<=1)).slice(0,1441):[];
-  events=Array.isArray(data?.events)?data.events.filter(item=>item&&Object.hasOwn(eventKinds,item.kind)&&
-    eventKinds[item.kind].results.includes(item.outcome)&&Number.isFinite(item.time)&&item.time>=0&&
-    item.time<=video.duration&&typeof item.note==='string').slice(0,1000):[];
   team?.restore(data?.team);
   renderMatch();
 }
 function renderMatch() {
   const mapper=calibratePitch(pitch),mapped=drawPitchMap($('pitchMap'),mapper,matchSamples);
   team?.sync();
-  $('startPitch').disabled=$('captureEvent').disabled=$('saveEvent').disabled=$('markGoal').disabled=!ready;
+  $('startPitch').disabled=$('captureEvent').disabled=$('saveEvent').disabled=$('markGoal').disabled=!ready||longNotesLoading;
+  $('attackDirection').disabled=longNotesLoading;
   renderTactics(mapper);
   renderSuggestions();
   $('exportEvents').disabled=!events.length&&!currentEstimates().length;
@@ -1382,7 +1495,7 @@ function renderMatch() {
   totals.replaceChildren();list.replaceChildren();
   for(const summary of eventTotals(events)) {
     const percentage=summary.known?Math.round(100*summary.success/summary.known):null;
-    const title=summary.kind==='pass'?'Pass completion':summary.kind==='shot'?'Shots on target':summary.label;
+    const title=summary.kind==='pass'?'Confirmed pass completion':summary.kind==='shot'?'Confirmed shots on target':summary.label;
     const text=percentage===null?`${title} · ${summary.unclear} unclear`:
       `${title} · ${summary.success}/${summary.known} (${percentage}%)${summary.unclear?` · ${summary.unclear} unclear`:''}`;
     totals.append(element('li',text));
@@ -1393,7 +1506,7 @@ function renderMatch() {
     if(item.note) row.append(element('p',item.note));
     const actions=element('div','');actions.className='row';
     actions.append(button('Replay',()=>{video.pause();seek(item.time);$('footage').scrollIntoView({block:'start'});}),
-      button('Remove',()=>{events.splice(index,1);renderMatch();}));
+      button('Remove',()=>{events.splice(index,1);rememberMatchNotes();renderMatch();}));
     row.append(actions);list.append(row);
   }
   if(pose&&ready)renderClipCoaching();
@@ -1422,7 +1535,7 @@ function markGoalPoint(x,y) {
     paint();return;
   }
   if(goalArea(pendingGoal)) {
-    goalPoints=pendingGoal;
+    goalPoints=pendingGoal;rememberMatchNotes();
     status('videoStatus','Goal area saved. Open Match to see shot candidates.');
   } else status('videoStatus','The goal area is too small. Try marking both corners again.');
   pendingGoal=null;updateCanvasMode();renderMatch();paint();
@@ -1438,7 +1551,7 @@ $('markGoal').onclick=()=>{
   }
   renderMatch();paint();
 };
-$('attackDirection').onchange=renderMatch;
+$('attackDirection').onchange=()=>{rememberMatchNotes();renderMatch();};
 function renderTactics(mapper) {
   const zones=$('tacticalZones'),cues=$('tacticalCues');
   zones.replaceChildren();cues.replaceChildren();
@@ -1483,7 +1596,7 @@ function renderAutomatic() {
         $('eventTime').value=item.time.toFixed(3);$('eventNote').value='';
         $('eventForm').scrollIntoView({block:'center'});
       }),button('Dismiss estimate',()=>{
-        dismissedEstimates.push(estimateId(item));renderMatch();
+        dismissedEstimates.push(estimateId(item));rememberMatchNotes();renderMatch();
       }));
     row.append(actions);list.append(row);
   }
@@ -1641,3 +1754,4 @@ $('nextCoachCue').onclick=()=>{
   paint();
 };
 updateLiveCoach(null);
+renderPlayerReference();

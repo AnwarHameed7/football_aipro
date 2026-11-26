@@ -50,8 +50,9 @@ async function createMediaPipe(kind,compatible,signal) {
           canvas,runningMode:'IMAGE',numPoses:compatible?3:4,outputSegmentationMasks:!compatible,
           minPoseDetectionConfidence:.55,minPosePresenceConfidence:.55,
         });
+        const detectorModel=kind==='ball-detail'?'efficientdet_lite2':'efficientdet_lite0';
         return library.ObjectDetector.createFromOptions(files,{
-          baseOptions:{delegate:'CPU',modelAssetPath:`${MODELS}/object_detector/efficientdet_lite0/float16/1/efficientdet_lite0.tflite`},
+          baseOptions:{delegate:'CPU',modelAssetPath:`${MODELS}/object_detector/${detectorModel}/float16/1/${detectorModel}.tflite`},
           canvas,runningMode:'IMAGE',categoryAllowlist:kind==='ball'?['sports ball']:['person','sports ball'],
           scoreThreshold:kind==='ball'?.45:.35,maxResults:40,
         });

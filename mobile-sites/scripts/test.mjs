@@ -1,4 +1,5 @@
 import {ballMatchSample,mapCropBall} from '../web/ball-review.js';
+import {loadPlayerReference,referenceMemory,savePlayerReference,suggestedAnchor} from '../web/player-reference.js';
 import {changedScene} from '../web/scene.js';
 import assert from 'node:assert/strict';
 import {PlayerLock, attemptReview, coachReview, metrics, seekFrame} from '../web/pose.js';
@@ -62,12 +63,24 @@ const ballOptions={
   onSection:()=>{if(ballScans.length===1)ballStop.abort();},
 };
 await assert.rejects(scanSavedBallSections({...ballOptions,session:ballSession,signal:ballStop.signal}),{name:'AbortError'});
-assert.deepEqual(ballProgress(ballSession),{ready:2,sections:1,observed:2,tried:3,eligible:3});
+assert.deepEqual(ballProgress(ballSession),{ready:2,sections:1,observed:2,tried:3,eligible:3,retry:0});
 await scanSavedBallSections({...ballOptions,session:ballSession,signal:new AbortController().signal});
 assert.deepEqual(ballScans,[0,2]);
 assert.deepEqual(ballRecords.get(2).forwardMemory,{marker:'player'});
 assert.equal(ballRecords.get(2).ballSamples[0].time,24);
-assert.deepEqual(ballProgress(ballSession),{ready:2,sections:2,observed:4,tried:6,eligible:6});
+assert.deepEqual(ballProgress(ballSession),{ready:2,sections:2,observed:4,tried:6,eligible:6,retry:0});
+const misses={parts:{0:{index:0,matched:2,ball:{observed:0,tried:3,eligible:3}},
+  1:{index:1,matched:2,ball:{observed:0,tried:3,eligible:3,detail:true}},
+  2:{index:2,matched:2,ball:{observed:2,tried:3,eligible:3}}}};
+assert.equal(ballProgress(misses).retry,1);
+const retriedIndices=[];
+const detailResult=await scanSavedBallSections({session:misses,duration:36,detail:true,
+  signal:new AbortController().signal,load:()=>({pose:{}}),scan:async (_record,index)=>{
+    retriedIndices.push(index);return {observed:3,tried:3,eligible:3,samples:[]};
+  },save:()=>{},onSection(){}});
+assert.deepEqual(retriedIndices,[0]);
+assert.equal(ballProgress(detailResult).retry,0);
+assert.equal(ballProgress(detailResult).observed,5);
 const reconnectSession={anchor:{time:0,x:.3,y:.4},parts:{0:{index:0,matched:2}}};
 await scanSections({session:reconnectSession,duration:40,index:0,anchorOverride:{time:6,x:.5,y:.5},
   signal:new AbortController().signal,load:()=>({kept:true}),
@@ -193,6 +206,22 @@ assert.equal(ballMatchSample([sportsBall(37,78),sportsBall(80,80,.85)],checkedPo
 const receiver={categories:[{categoryName:'person',score:.95}],boundingBox:{originX:68,originY:30,width:19,height:50}};
 const reception=ballMatchSample([sportsBall(77,80),receiver],checkedPose,100,100,ballCtx);
 assert.deepEqual(reception.receiver,{x:.775,y:.56,team:'similar',clear:false});
+const fakeStorage=new Map();
+const testStorage={getItem:key=>fakeStorage.get(key),setItem:(key,value)=>fakeStorage.set(key,value),
+  removeItem:key=>fakeStorage.delete(key)};
+const referencePose=at(.45).sig;
+const reference=savePlayerReference(testStorage,{seed:referencePose,references:[referencePose]});
+assert.deepEqual(loadPlayerReference(testStorage),reference);
+assert.deepEqual(referenceMemory(reference).last,reference.seed);
+assert.equal(referenceMemory(reference).acrossCut,true);
+assert.equal(suggestedAnchor([{time:0,points},{time:.125,points:null}]),null);
+assert.equal(suggestedAnchor([{time:0,points},{time:.125,points,cut:true}]),null);
+assert.equal(suggestedAnchor([{time:0,points},{time:.125,points}]).time,.125);
+assert.equal(savePlayerReference(testStorage,null),null);
+assert.equal(loadPlayerReference(testStorage),null);
+const similarReference=new PlayerLock(referencePose);
+similarReference.markDiscontinuity();
+assert.equal(similarReference.match([at(.1),at(.8)]).state,'ambiguous');
 const coverageExample=poseCoverage([
   {time:0,points},{time:.125,points:null},{time:.25,points:null},{time:.375,points},
 ],.49);

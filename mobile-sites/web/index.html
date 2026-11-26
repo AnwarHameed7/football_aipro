@@ -27,11 +27,23 @@
           <button id="markEventTime" type="button" hidden>Use current time</button>
           <button id="jumpReturn" type="button" hidden>Next re-entry</button>
         </div>
+        <details id="playerReferencePanel">
+          <summary>My player reference</summary>
+          <p class="meta" id="playerReferenceStatus" role="status"></p>
+          <div class="row">
+            <button id="savePlayerReference" type="button" disabled>Remember my player</button>
+            <button id="findPlayerReference" type="button" disabled>Find me in this clip</button>
+            <button id="acceptPlayerReference" type="button" hidden>Use suggested player</button>
+            <button id="discardPlayerReference" type="button" hidden>Dismiss suggestion</button>
+            <button id="forgetPlayerReference" type="button" hidden>Forget player reference</button>
+          </div>
+        </details>
         <div id="longReview" hidden>
           <p id="longProgress" class="meta" role="status"></p>
           <div class="row">
-            <button id="scanMatch" type="button" disabled>Scan rest of match</button>
+            <button id="scanMatch" type="button" disabled>Review full match</button>
             <button id="scanMatchBall" type="button" disabled>Scan ball in reviewed sections</button>
+            <button id="retryMatchBall" type="button" hidden>Retry missed ball sections</button>
             <label>Reviewed section <select id="reviewMatchSection" disabled></select></label>
           </div>
           <p id="longBallProgress" class="meta" role="status"></p>
