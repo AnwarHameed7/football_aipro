@@ -4,7 +4,7 @@ export const located = point => point && Number.isFinite(point.x) && Number.isFi
 const gap=(a,b)=>Math.hypot(a.x-b.x,a.y-b.y);
 const midpoint=(a,b)=>a&&b?{x:(a.x+b.x)/2,y:(a.y+b.y)/2}:a||b;
 
-function colourPatch(ctx,point,radius) {
+export function colourPatch(ctx,point,radius) {
   if(!point)return null;
   const {width,height}=ctx.canvas;
   const x=Math.max(0,Math.floor((point.x-radius)*width));
@@ -95,6 +95,15 @@ export class PlayerLock {
     this.missing=0;
     this.pending=null;
     this.streak=0;
+    this.acrossCut=false;
+  }
+
+  markDiscontinuity() {
+    this.missing=Math.max(7,this.missing);
+    this.velocity={x:0,y:0};
+    this.pending=null;
+    this.streak=0;
+    this.acrossCut=true;
   }
 
   predicted() {
@@ -125,7 +134,10 @@ export class PlayerLock {
     const close=best&&best.spatial<radius&&best.scale<.63;
     const margin=second?second.score-best.score:Infinity;
     let person=null,state=people.length?'ambiguous':'lost';
-    if(best&&best.colour<(close&&this.missing<=2?.52:.34)&&margin>(close&&this.missing<=2?.038:.085)) {
+    const stable=close&&this.missing<=2&&!this.acrossCut;
+    const colourLimit=this.acrossCut?.26:stable?.52:.34;
+    const marginLimit=this.acrossCut?.13:stable?.038:.085;
+    if(best&&best.colour<colourLimit&&margin>marginLimit) {
       const briefGap=this.missing===1&&best.spatial<Math.min(.024,radius*.45)&&best.scale<.40&&best.colour<.24&&margin>.13;
       if(close&&(!this.missing||briefGap)) {
         person=best.person;
@@ -140,7 +152,7 @@ export class PlayerLock {
         this.streak=same?this.streak+1:1;
         this.pending=candidate;
         state='checking';
-        const required=close&&this.missing<=3&&best.colour<.22?2:3;
+        const required=this.acrossCut?4:close&&this.missing<=3&&best.colour<.22?2:3;
         if(this.streak>=required){person=best.person;state='reacquired';}
       }
     } else {
@@ -156,6 +168,7 @@ export class PlayerLock {
         };
       } else this.velocity={x:0,y:0};
       this.last=next;
+      this.acrossCut=false;
       this.missing=0;
       this.pending=null;
       this.streak=0;

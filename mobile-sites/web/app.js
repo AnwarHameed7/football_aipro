@@ -1,8 +1,9 @@
-import {LONG_CLIP_SECONDS,SECTION_SECONDS,matchKey,matchProgress,nextSection,readMatch,readSection,
-  saveSection,scanSections,sectionAt,sectionRange,startMatch} from './match-review.js';
+import {LONG_CLIP_SECONDS,SECTION_SECONDS,ballProgress,matchKey,matchProgress,nextSection,readMatch,readSection,
+  saveSection,scanSavedBallSections,scanSections,sectionAt,sectionRange,startMatch} from './match-review.js';
 import {openPoseReview,savePoseReview} from './saved-pose.js';
 import {poseCoverage,reconnectTrack,sampleAt,skillMoments} from './review-flow.js';
-import {withPoseFallback} from './pose-engine.js';
+import {closeModel,objectModel,withPoseFallback} from './pose-engine.js';
+import {analyzeSectionBall} from './ball-review.js';
 import {activeCoachingCue,drawBodyOutline} from './highlight.js';
 import {teamWorkspace} from './team-ui.js';
 import {analyze,attemptReview,coachReview,drawMovementMap,metrics,render3d,skeleton} from './pose.js';
@@ -515,20 +516,28 @@ function renderLongReview() {
   $('stopTrackHere').textContent=holder.hidden?'Stop tracking':'Pause scan';
   if(holder.hidden)return;
   const select=$('reviewMatchSection'),action=$('scanMatch');
-  const coverage=matchProgress(longSession,video.duration);
+  const coverage=matchProgress(longSession,video.duration),balls=ballProgress(longSession);
   const next=longSession?nextSection(longSession,video.duration):null;
   action.disabled=!!scanJob||!longKey||next===null||!coverage.count;
+  const ballAction=$('scanMatchBall');
+  ballAction.disabled=!!scanJob||!longKey||balls.ready===balls.sections;
+  ballAction.textContent=balls.sections&&balls.ready===balls.sections?'Ball scan complete':
+    balls.sections?'Continue ball scan':'Scan ball in reviewed sections';
+  status('longBallProgress',balls.sections?
+    `${balls.sections}/${balls.ready} pose sections checked for ball movement. Ball visible in ${balls.observed}/${balls.tried} sampled frames with a matched player.`:
+    'After saving pose sections, run a separate ball scan to review possible touches and passes.');
   action.textContent=next===null&&coverage.count?'Match scan complete':coverage.count>1?'Continue match scan':'Scan rest of match';
   const parts=Object.values(longSession?.parts||{}).sort((a,b)=>a.index-b.index);
   select.replaceChildren(new Option('Choose a section',''));
   for(const part of parts) {
     const range=sectionRange(part.index,video.duration);
-    select.add(new Option(`${matchTime(range.start)}–${matchTime(range.end)} · ${part.matched?'player poses':'identity unconfirmed'}`,part.index));
+    const ball=part.ball?part.ball.candidates?` · ${part.ball.candidates} ball candidate(s)`:' · ball checked':'';
+    select.add(new Option(`${matchTime(range.start)}–${matchTime(range.end)} · ${part.matched?'player poses':'identity unconfirmed'}${ball}`,part.index));
   }
   select.value=longIndex===null?'':String(longIndex);
   select.disabled=!!scanJob||!longKey||!parts.length;
   status('longProgress',coverage.count?
-    `${matchTime(coverage.seconds)} of ${matchTime(video.duration)} scanned · ${coverage.count} saved sections · ${Math.round(100*coverage.matched/Math.max(1,coverage.total))}% of sampled poses matched. Keep this tab open during a match scan. Use Set in and Set out on a short passage for ball cues.`:
+    `${matchTime(coverage.seconds)} of ${matchTime(video.duration)} scanned · ${coverage.count} saved sections · ${Math.round(100*coverage.matched/Math.max(1,coverage.total))}% of sampled poses matched. Keep this tab open during a match scan.`:
     `This video is ${matchTime(video.duration)}. Select yourself to scan the current ${SECTION_SECONDS}-second section first.`);
 }
 function displayLongSection(index,result,jump=true) {
@@ -608,6 +617,10 @@ async function runLongReview(clip,signal,scan,onRetry) {
     index:all?nextSection(longSession,duration):index,all,anchorOverride:all?null:longOverride||anchor,signal,
     load:(session,part)=>key?readSection(key,session,part):null,
     scan:options=>scan({...options,lookForBall:false,compact:true,engine}),
+    combine:(saved,fresh,time)=>{
+      const combined=reconnectTrack(restoreSection(saved),fresh,time);
+      return {...combined,ballSamples:[],backwardMemory:saved.backwardMemory||combined.backwardMemory};
+    },
     save:(session,part,result)=>key?saveSection(key,session,part,{
       pose:savePoseReview(result,'running',null,'right'),ballSamples:result.ballSamples,
       forwardMemory:result.forwardMemory,backwardMemory:result.backwardMemory,
@@ -627,6 +640,87 @@ async function runLongReview(clip,signal,scan,onRetry) {
     'Section saved on this device. Scan the rest of the match when you’re ready.'):'Section analyzed. Browser storage is unavailable.');
 }
 
+function beginScan(job,message) {
+  scanJob=job;scanFailure=null;scanMessage=message;
+  $('scanPose').disabled=true;
+  $('stopPose').hidden=$('stopTrackHere').hidden=$('poseProgress').hidden=$('liveProgress').hidden=false;
+  $('poseProgress').removeAttribute('value');$('liveProgress').removeAttribute('value');
+  updateTargetControls();team?.sync();paint();updateLiveCoach(null);
+}
+
+function finishScan() {
+  scanJob=null;scanMessage='';longAll=false;$('scanPose').disabled=!ready;
+  $('stopPose').hidden=$('stopTrackHere').hidden=$('poseProgress').hidden=$('liveProgress').hidden=true;
+  updateTargetControls();team?.sync();paint();updateLiveCoach(poseAt(video.currentTime));
+}
+
+async function primeDecoder(clip,signal) {
+  if(video.readyState<2) {
+    const muted=video.muted;
+    video.muted=true;
+    let timeout;
+    try {
+      await Promise.race([video.play(),new Promise((_,reject)=>{
+        timeout=setTimeout(()=>reject(new Error('Play the video once, pause, then retry the scan.')),5000);
+      })]);
+    } finally {
+      clearTimeout(timeout);
+      if(source===clip){video.pause();video.muted=muted;}
+    }
+  } else video.pause();
+  signal.throwIfAborted();
+}
+
+function drawScanProgress(message,value) {
+  $('poseProgress').value=$('liveProgress').value=Math.max(0,Math.min(1,value));
+  scanMessage=`${message} · ${Math.round(value*100)}%`;
+  status('poseStatus',scanMessage);updateLiveCoach(null);
+}
+
+$('scanMatchBall').onclick=async()=>{
+  if(!ready||scanJob||!longKey||!longSession||team?.isScanning())return;
+  const job=new AbortController(),clip=source,key=longKey,position=video.currentTime;
+  const signal=job.signal;
+  beginScan(job,'Opening the ball detector…');
+  let detector,display,message;
+  try {
+    await primeDecoder(clip,signal);
+    detector=await objectModel('people',signal);
+    await scanSavedBallSections({
+      session:longSession,duration:video.duration,signal,
+      load:(session,index)=>readSection(key,session,index),
+      save:(session,index,record)=>saveSection(key,session,index,record),
+      scan:async (record,index,range)=>{
+        const restored=restoreSection(record);
+        if(!restored)throw new Error('A saved section has no usable player pose.');
+        const result=await analyzeSectionBall(video,detector,restored.frames,range.start,range.end,{
+          signal,progress:value=>drawScanProgress(`Ball scan at ${matchTime(range.start)}`,value),
+        });
+        return {...result,candidates:suggestBallEvents(result.samples,[]).length};
+      },
+      onSection(session,index,record) {
+        if(source!==clip)return;
+        longSession=session;
+        if(index===longIndex)display={index,record};
+        renderLongReview();
+      },
+    });
+    message='Ball scan complete for the saved sections. Open a reviewed section to see its ball candidates.';
+  } catch(error) {
+    message=signal.aborted?'Ball scan paused. Completed sections are saved.':
+      `Ball scan could not finish. ${error.message} Your pose review is still available.`;
+  } finally {
+    if(detector)closeModel(detector);
+    if(source===clip) {
+      if(display)displayLongSection(display.index,restoreSection(display.record),false);
+      status('selectionHelp',message);
+      status('poseStatus',message);
+      seek(position);
+    }
+    finishScan();
+  }
+};
+
 $('stopPose').onclick=$('stopTrackHere').onclick=()=>scanJob?.abort();
 $('scanPose').onclick=async()=>{
   if(!ready || scanJob) return;
@@ -636,24 +730,9 @@ $('scanPose').onclick=async()=>{
     return;
   }
   const job=new AbortController(),clip=source,generation=scanGeneration;
-  scanJob=job;scanFailure=null;scanMessage='Opening the video frames…';
-  $('scanPose').disabled=true;
-  $('stopPose').hidden=$('stopTrackHere').hidden=$('poseProgress').hidden=$('liveProgress').hidden=false;
-  $('poseProgress').removeAttribute('value');$('liveProgress').removeAttribute('value');
-  updateTargetControls();team?.sync();paint();updateLiveCoach(null);
+  beginScan(job,'Opening the video frames…');
   try {
-    // Keep the seekable element the viewer already opened. iOS can defer decoding a second, unseen video.
-    if(video.readyState<2) {
-      const originalMuted=video.muted;
-      video.muted=true;
-      try {
-        await Promise.race([video.play(),new Promise((_,reject)=>setTimeout(
-          ()=>reject(new Error('Could not start decoding. Play the video once, pause, then tap Track me.')),5000))]);
-      } finally {
-        if(source===clip) {video.pause();video.muted=originalMuted;}
-      }
-    } else video.pause();
-    job.signal.throwIfAborted();
+    await primeDecoder(clip,job.signal);
     scanMessage='Loading the pose model. The first scan may take longer.';
     status('poseStatus',scanMessage);updateLiveCoach(null);
     const inRange=last>first&&anchor.time>=first/fps()&&anchor.time<(last+1)/fps();
@@ -663,10 +742,7 @@ $('scanPose').onclick=async()=>{
       status('poseStatus',scanMessage);updateLiveCoach(null);
     };
     const run=({index,...options})=>analyze({url:sourceUrl,sourceVideo:video,signal:job.signal,onRetry,progress:value=>{
-        $('poseProgress').value=$('liveProgress').value=Math.max(0,Math.min(1,value));
-        scanMessage=(index===undefined?'Analyzing selected player':`Section starting at ${matchTime(index*SECTION_SECONDS)}`)+
-          ` · ${Math.round(value*100)}%`;
-        status('poseStatus',scanMessage);updateLiveCoach(null);
+        drawScanProgress(index===undefined?'Analyzing selected player':`Section starting at ${matchTime(index*SECTION_SECONDS)}`,value);
       },...options});
     if(longClip()&&(longAll||!inRange||(last+1-first)/fps()>SECTION_SECONDS)) {
       await runLongReview(clip,job.signal,run,onRetry);
@@ -705,9 +781,7 @@ $('scanPose').onclick=async()=>{
       seek(anchor.time);
     }
   } finally {
-    scanJob=null;scanMessage='';longAll=false;$('scanPose').disabled=!ready;
-    $('stopPose').hidden=$('stopTrackHere').hidden=$('poseProgress').hidden=$('liveProgress').hidden=true;
-    updateTargetControls();team?.sync();paint();updateLiveCoach(poseAt(video.currentTime));
+    finishScan();
   }
 };
 function poseReport(result) {
@@ -1420,7 +1494,11 @@ function renderSuggestions() {
   $('markGoal').textContent=pendingGoal?'Cancel goal marking':goalPoints.length?'Re-mark goal area':'Mark goal area';
   status('goalStatus',goalPoints.length?'Goal area marked. Shot cues refer to this region of the picture.':
     'For shot candidates, mark opposite corners of the goal mouth in a fixed-camera clip.');
-  if(!ballSamples.length) {status('suggestedHelp','Enable ball proximity before you run tracking to find pass and shot candidates.');return;}
+  if(!ballSamples.length) {
+    status('suggestedHelp',longClip()?'Use Scan ball in reviewed sections to look for touches and passes.':
+      'Enable ball proximity before you run tracking to find pass and shot candidates.');
+    return;
+  }
   const found=suggestBallEvents(ballSamples,goalPoints).filter(item=>!item.automatic&&
     !events.some(record=>record.kind===item.kind&&Math.abs(record.time-item.time)<=.7));
   status('suggestedHelp',found.length?'Check candidate events on replay before adding them to your match stats.':

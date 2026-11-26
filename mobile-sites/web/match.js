@@ -110,7 +110,7 @@ export function suggestBallEvents(samples,goalPoints) {
   const reset=()=>{near=0;nearStrong=0;departure=null;receiver=null;goalHits=0;insideStrong=0;missing=0;};
   let previous=-Infinity;
   for(const sample of samples) {
-    if(sample.time-previous>.35)reset();
+    if(sample.cut||sample.time-previous>.35)reset();
     previous=sample.time;
     if(departure&&sample.time-departure.time>2)reset();
     if(!sample.ball) {

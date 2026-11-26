@@ -1,8 +1,10 @@
+import {ballMatchSample,mapCropBall} from '../web/ball-review.js';
+import {changedScene} from '../web/scene.js';
 import assert from 'node:assert/strict';
 import {PlayerLock, attemptReview, coachReview, metrics, seekFrame} from '../web/pose.js';
 import {PlayerSelectionError, PoseEngineError, modelWithin, withPoseFallback} from '../web/pose-engine.js';
 import {gapCandidate, mergePlayers, playerCrop, reentryCrop, tappedPlayer, uncropPoint} from '../web/player-selection.js';
-import {matchKey, matchProgress, nextSection, scanSections, sectionAt, sectionRange} from '../web/match-review.js';
+import {ballProgress, matchKey, matchProgress, nextSection, scanSavedBallSections, scanSections, sectionAt, sectionRange} from '../web/match-review.js';
 import {calibratePitch, estimateId, eventTotals, suggestBallEvents, tacticalZones, unreviewedEstimates} from '../web/match.js';
 import {outcomeRate, planFor} from '../web/training.js';
 import worker from '../dist/server/index.js';
@@ -46,6 +48,36 @@ assert.equal(queued.length,450);
 assert.equal(new Set(queued).size,450);
 assert.equal(nextSection(full,5400),null);
 assert.equal(matchProgress(full,5400).seconds,5400);
+
+const ballStop=new AbortController(),ballRecords=new Map();
+let ballSession={id:'review',parts:{0:{index:0,matched:10},1:{index:1,matched:0},2:{index:2,matched:4}}};
+const ballScans=[];
+const ballOptions={
+  duration:35,load:()=>({pose:{},forwardMemory:{marker:'player'}}),
+  scan:async (_record,index,{start,end})=>{
+    assert.ok(end-start<=12);
+    ballScans.push(index);return {samples:[{time:start}],observed:2,tried:3,eligible:3,candidates:1};
+  },
+  save:(session,index,record)=>{ballSession=structuredClone(session);ballRecords.set(index,record);},
+  onSection:()=>{if(ballScans.length===1)ballStop.abort();},
+};
+await assert.rejects(scanSavedBallSections({...ballOptions,session:ballSession,signal:ballStop.signal}),{name:'AbortError'});
+assert.deepEqual(ballProgress(ballSession),{ready:2,sections:1,observed:2,tried:3,eligible:3});
+await scanSavedBallSections({...ballOptions,session:ballSession,signal:new AbortController().signal});
+assert.deepEqual(ballScans,[0,2]);
+assert.deepEqual(ballRecords.get(2).forwardMemory,{marker:'player'});
+assert.equal(ballRecords.get(2).ballSamples[0].time,24);
+assert.deepEqual(ballProgress(ballSession),{ready:2,sections:2,observed:4,tried:6,eligible:6});
+const reconnectSession={anchor:{time:0,x:.3,y:.4},parts:{0:{index:0,matched:2}}};
+await scanSections({session:reconnectSession,duration:40,index:0,anchorOverride:{time:6,x:.5,y:.5},
+  signal:new AbortController().signal,load:()=>({kept:true}),
+  scan:async ({start})=>{assert.equal(start,6);return {frames:[{time:6,points:[1]}]};},
+  combine:(current,fresh,time)=>{assert.ok(current.kept);assert.equal(time,6);return {
+    frames:[{time:0,points:[1]},...fresh.frames],
+  };},
+  save:(_session,_index,result)=>assert.deepEqual(result.frames.map(frame=>frame.time),[0,6]),onSection(){}});
+assert.equal(changedScene(new Uint8Array(24),new Uint8Array(24).fill(215)),true);
+assert.equal(changedScene(new Uint8Array(24).fill(100),new Uint8Array(24).fill(110)),false);
 
 const modes=[],closed=[];
 const engineRun=await withPoseFallback(async engine=>{
@@ -107,6 +139,10 @@ assert.equal(lock.match([kit(1,.8),kit(1,.78)]).state,'ambiguous');
 assert.deepEqual([.8,.81,.82].map(x=>lock.match([kit(1,x),kit(22,.24)]).state),
   ['checking','checking','reacquired']);
 
+const afterCut=new PlayerLock(kit(1,.2).sig);
+afterCut.markDiscontinuity();
+assert.deepEqual([.2,.21,.22,.23].map(x=>afterCut.match([kit(1,x)]).state),
+  ['checking','checking','checking','reacquired']);
 const bodyReference=kit(1,.2).sig;
 bodyReference.lower=kit(5,.2).sig.bins;
 const sameShirt=kit(1,.206),sameBody=kit(1,.210);
@@ -145,6 +181,18 @@ points[27]={x:.37,y:.78,z:0,visibility:1};
 points[28]={x:.47,y:.77,z:0,visibility:1};
 assert.ok(metrics(frames[0],1.8).some(([name])=>name==='Left knee (2D)'));
 assert.match(attemptReview(frames,.5,'landing','right',1.8).findings[0].observation,/in the camera view/);
+const checkedPose={time:1,points};
+const sportsBall=(x,y,score=.9)=>({categories:[{categoryName:'sports ball',score}],
+  boundingBox:{originX:x-2,originY:y-2,width:4,height:4}});
+const ballCtx={canvas:{width:100,height:100},getImageData:(_x,_y,w,h)=>({data:new Uint8Array(w*h*4).fill(110)})};
+const projectedBall=mapCropBall(sportsBall(100,100),{x:200,y:100,side:200,width:800,height:400},200,400,200);
+assert.deepEqual(projectedBall.boundingBox,{originX:149,originY:99,width:2,height:2});
+const nearBall=ballMatchSample([sportsBall(37,78)],checkedPose,100,100,ballCtx);
+assert.equal(nearBall.nearYou,true);
+assert.equal(ballMatchSample([sportsBall(37,78),sportsBall(80,80,.85)],checkedPose,100,100,ballCtx).ball,null);
+const receiver={categories:[{categoryName:'person',score:.95}],boundingBox:{originX:68,originY:30,width:19,height:50}};
+const reception=ballMatchSample([sportsBall(77,80),receiver],checkedPose,100,100,ballCtx);
+assert.deepEqual(reception.receiver,{x:.775,y:.56,team:'similar',clear:false});
 const coverageExample=poseCoverage([
   {time:0,points},{time:.125,points:null},{time:.25,points:null},{time:.375,points},
 ],.49);
@@ -170,6 +218,7 @@ assert.deepEqual([success,known,unclear],[1,2,1]);
 const ball=(time,x,nearYou=false,receiver=null)=>({time,ball:[x,.5],nearYou,receiver});
 const peer={team:'similar',x:.52,y:.5};
 const departure=[ball(1,.20,true),ball(1.25,.21,true),ball(1.5,.28)];
+assert.equal(suggestBallEvents([...departure,{...ball(1.75,.51,false,peer),cut:true},ball(2,.52,false,peer)],[]).length,0);
 assert.equal(suggestBallEvents([...departure,ball(1.75,.51,false,peer),ball(2,.52,false,peer)],[])[0].outcome,'Completed');
 assert.equal(suggestBallEvents([...departure,ball(2.3,.51,false,peer),ball(2.55,.52,false,peer)],[]).length,0);
 assert.equal(suggestBallEvents([...departure,ball(1.75,.82),ball(2,.84)],[[.79,.4],[.9,.6]])[0].kind,'shot');

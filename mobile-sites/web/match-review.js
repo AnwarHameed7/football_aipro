@@ -76,7 +76,7 @@ export const saveSection=(key,session,index,record)=>transact('readwrite',store=
   };
 });
 
-export async function scanSections({session,duration,index,all=false,anchorOverride,signal,load,scan,save,onSection}) {
+export async function scanSections({session,duration,index,all=false,anchorOverride,signal,load,scan,save,combine,onSection}) {
   const original=sectionAt(session.anchor.time,duration);
   let current=session,part=index;
   while(part!==null) {
@@ -92,7 +92,10 @@ export async function scanSections({session,duration,index,all=false,anchorOverr
     if(!selection&&!memory)throw new Error('Select yourself in this section to continue the review.');
     const time=backward?Math.max(start,end-.125):start;
     const sourceAnchor=selection||{...memory.last.center,time};
-    const result=await scan({index:part,start,end,anchor:sourceAnchor,memory:selection?null:memory});
+    const previous=anchorOverride&&current.parts[part]&&combine?await load(current,part):null;
+    const scanStart=previous?Math.max(start,sourceAnchor.time):start;
+    const fresh=await scan({index:part,start:scanStart,end,anchor:sourceAnchor,memory:selection?null:memory});
+    const result=previous?combine(previous,fresh,sourceAnchor.time):fresh;
     signal.throwIfAborted();
     const matched=result.frames.filter(frame=>frame.points).length;
     const summary={index:part,matched,total:result.frames.length};
@@ -102,6 +105,39 @@ export async function scanSections({session,duration,index,all=false,anchorOverr
     onSection(current,part,result);
     part=all?nextSection(current,duration):null;
     anchorOverride=null;
+  }
+  return current;
+}
+
+export function ballProgress(session) {
+  return Object.values(session?.parts||{}).reduce((summary,part)=>{
+    if(!part.matched)return summary;
+    summary.ready++;
+    if(part.ball) {
+      summary.sections++;
+      summary.observed+=part.ball.observed;
+      summary.tried+=part.ball.tried;
+      summary.eligible+=part.ball.eligible;
+    }
+    return summary;
+  },{ready:0,sections:0,observed:0,tried:0,eligible:0});
+}
+
+export async function scanSavedBallSections({session,duration,signal,load,scan,save,onSection}) {
+  let current=session;
+  const pending=Object.values(session.parts).filter(part=>part.matched&&!part.ball)
+    .sort((a,b)=>a.index-b.index);
+  for(const part of pending) {
+    signal.throwIfAborted();
+    const record=await load(current,part.index);
+    if(!record?.pose)throw new Error('A saved pose section is missing. Reconnect in that section and scan it again.');
+    const {samples,...ball}=await scan(record,part.index,sectionRange(part.index,duration));
+    signal.throwIfAborted();
+    const next={...current,parts:{...current.parts,[part.index]:{...part,ball}}};
+    const amended={...record,ballSamples:samples};
+    await save(next,part.index,amended);
+    current=next;
+    onSection(current,part.index,amended);
   }
   return current;
 }

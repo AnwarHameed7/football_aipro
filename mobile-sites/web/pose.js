@@ -1,3 +1,4 @@
+import {changedScene,sceneSample} from './scene.js';
 import {maskContours,poseContours} from './highlight.js';
 import {appleMobile,closeModel,objectModel,PlayerSelectionError,PoseEngineError,withPoseFallback} from './pose-engine.js';
 import {gapCandidate,kitDistance,mergePlayers,PlayerLock,playerCrop,playerSignature,reentryCrop,tappedPlayer,uncropPoint} from './player-selection.js';
@@ -75,6 +76,9 @@ async function scanPose(video,detector,{anchor,start,end,lookForBall,signal,prog
   const zoomed=document.createElement('canvas');
   zoomed.width=zoomed.height=compact?352:480;
   const zoomContext=zoomed.getContext('2d');
+  const scene=document.createElement('canvas');
+  scene.width=16;scene.height=9;
+  const sceneContext=scene.getContext('2d',{willReadFrequently:true});
   const trace=document.createElement('canvas');
   const traceScale=112/Math.max(image.width,image.height);
   trace.width=Math.max(2,Math.round(image.width*traceScale));
@@ -92,10 +96,13 @@ async function scanPose(video,detector,{anchor,start,end,lookForBall,signal,prog
     lock=new PlayerLock(memory.seed,memory.references);
     lock.last=memory.last;
     lock.missing=memory.missing;
+    if(memory.acrossCut)lock.markDiscontinuity();
   }
+  let previousScene=memory?.scene,anchorScene;
   let poseOutline=false,tile=0;
   let forwardMemory=null;
-  const trackMemory=()=>lock?{seed:origin,references:lock.references,last:lock.last,missing:lock.missing}:null;
+  const trackMemory=()=>lock?{seed:origin,references:lock.references,last:lock.last,missing:lock.missing,
+    acrossCut:lock.acrossCut,scene:previousScene}:null;
   const signatures=new Map();
   const read=async ({crop=null,preferred})=>{
     let people=[];
@@ -127,11 +134,22 @@ async function scanPose(video,detector,{anchor,start,end,lookForBall,signal,prog
       if(reverse&&i===forward.length) {
         if(!origin)break;
         forwardMemory=trackMemory();
-        if(!memory)lock=new PlayerLock(origin,lock.references);
+        if(!memory) {
+          lock=new PlayerLock(origin,lock.references);
+          previousScene=anchorScene;
+        }
         last=null;
       }
       signal.throwIfAborted();
       await seekFrame(video,time,signal);ctx.drawImage(video,0,0,image.width,image.height);
+      const sceneNow=sceneSample(image,sceneContext);
+      if(i===0)anchorScene=sceneNow;
+      const cut=changedScene(previousScene,sceneNow);
+      previousScene=sceneNow;
+      if(cut&&lock) {
+        lock.markDiscontinuity();
+        last=null;fast=nearby=0;
+      }
       let chosen,state='lost';
       const tapCandidates=people=>tappedPlayer(people,anchor,image.width,image.height,i===0?.014:.021);
       const preferred=people=>lock?lock.rank(people)[0]?.person:tapCandidates(people);
@@ -178,9 +196,9 @@ async function scanPose(video,detector,{anchor,start,end,lookForBall,signal,prog
       if(!lock&&i>=4)throw new PlayerSelectionError();
       if(!chosen) {
         fast=nearby=0;
-        frames.push({time,points:null,world:null,state});
+        frames.push({time,points:null,world:null,state,cut});
       } else {
-        frames.push({time,points:chosen.points,world:chosen.world,outline,state});
+        frames.push({time,points:chosen.points,world:chosen.world,outline,state,cut});
         signatures.set(time,chosen.sig);
         if(!reverse && last && state==='tracked') {
           const s=chosen.sig, motion=Math.hypot(s.hip.x-last.hip.x,s.hip.y-last.hip.y)/s.torso;
@@ -224,7 +242,7 @@ async function scanPose(video,detector,{anchor,start,end,lookForBall,signal,prog
           receiver={...person.sig.hip,team:kit<.28?'similar':'unknown',
             clear:kit<.18&&receivers[0].range<.48&&state!=='checking'};
         }
-        ballSamples.push({time,ball:center,nearYou,receiver,score:center?balls[0].score:0});
+        ballSamples.push({time,ball:center,nearYou,receiver,score:center?balls[0].score:0,cut});
         nearby=nearYou?nearby+1:0;
         if(!reverse&&nearby===2&&time-lastBall>2) {
           lastBall=time;
@@ -246,7 +264,7 @@ async function scanPose(video,detector,{anchor,start,end,lookForBall,signal,prog
       while(j<=stop&&!sorted[j].points)j++;
       if(j>stop)continue;
       const right=sorted[j],before=signatures.get(left.time),after=signatures.get(right.time);
-      if(!before||!after||right.time-left.time>.51)continue;
+      if(!before||!after||right.time-left.time>.51||sorted.slice(i-1,j+1).some(sample=>sample.cut))continue;
       for(let k=i;k<j&&retried<24;k++) {
         signal.throwIfAborted();
         retried++;
@@ -282,7 +300,7 @@ async function scanPose(video,detector,{anchor,start,end,lookForBall,signal,prog
       forwardMemory:forwardMemory||trackMemory(),backwardMemory:backward.length?trackMemory():null};
   } finally {
     if(ball)closeModel(ball);
-    for(const canvas of [image,zoomed,trace]) {canvas.width=1;canvas.height=1;}
+    for(const canvas of [image,zoomed,trace,scene]) {canvas.width=1;canvas.height=1;}
   }
 }
 
