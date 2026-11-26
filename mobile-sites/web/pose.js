@@ -1,3 +1,4 @@
+import {repeatedSteps} from './workout.js';
 import {changedScene,sceneSample} from './scene.js';
 import {maskContours,poseContours} from './highlight.js';
 import {appleMobile,closeModel,objectModel,PlayerSelectionError,PoseEngineError,withPoseFallback} from './pose-engine.js';
@@ -215,7 +216,8 @@ async function scanPose(video,detector,{anchor,start,end,lookForBall,signal,prog
         catch {signal.throwIfAborted();ballUnavailable=true;}
       }
       let detections;
-      if(ball&&lock&&i%2===0) {
+      if(ball&&lock&&i%2===0&&!chosen)ballSamples.push({time,ball:null,nearYou:false,receiver:null,score:0,identityUnclear:true,cut});
+      if(ball&&lock&&i%2===0&&chosen) {
         try {detections=ball.detect(image).detections;}
         catch {closeModel(ball);ball=null;ballUnavailable=true;}
       }
@@ -383,6 +385,7 @@ export function coachReview(frames, aspect) {
   const flush=()=>{if(run.length>=4)windows.push(run);run=[];};
   for(const sample of frames) {
     if(!sample.points) {flush();continue;}
+    if(sample.cut)flush();
     if(run.length&&sample.time-run.at(-1).time>.2)flush();
     run.push(sample);
     if(run.length===16) flush();
@@ -397,7 +400,8 @@ export function coachReview(frames, aspect) {
     if(!best[key]||best[key].score<score)best[key]=item;
   };
   const median=items=>[...items].sort((a,b)=>a-b)[Math.floor(items.length/2)];
-  for(const span of windows) {
+  const runningWindows=windows.filter(span=>repeatedSteps(span,aspect));
+  for(const span of runningWindows) {
     const trunks=[], knees=[], elbows=[];
     const projected=span.every(sample=>!sample.world);
     for(const sample of span) {
@@ -433,7 +437,7 @@ export function coachReview(frames, aspect) {
     }
   }
   for(const key of ['trunk','knee','elbow']) if(best[key]) findings.push(best[key]);
-  return {matched,total:frames.length,usableWindows:windows.length,findings,moments};
+  return {matched,total:frames.length,usableWindows:runningWindows.length,findings,moments};
 }
 
 export function attemptReview(frames, time, mode, side, aspect) {
@@ -444,6 +448,9 @@ export function attemptReview(frames, time, mode, side, aspect) {
   const nearest=sampleTime=>matched.reduce((best,item)=>Math.abs(item.time-sampleTime)<Math.abs(best.time-sampleTime)?item:best);
   const contact=nearest(time), before=nearest(time-.30), after=nearest(time+.30);
   if(Math.abs(contact.time-time)>.14 || before.time>time-.12 || after.time<time+.12) return out;
+  const span=matched.filter(item=>item.time>=before.time&&item.time<=after.time);
+  if(all.some(item=>item.cut&&item.time>before.time&&item.time<=after.time)||
+    span.some((item,index)=>index&&item.time-span[index-1].time>.26))return out;
   out.usableWindows=1;
   const add=(observation,cue)=>out.findings.push({focus:mode,start:Math.max(0,time-.35),end:time+.4,observation,cue});
   const [foot,plant,hip,knee]=side==='left'?[27,28,23,25]:[28,27,24,26];

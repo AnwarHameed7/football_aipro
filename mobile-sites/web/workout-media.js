@@ -1,10 +1,27 @@
+import {playerCrop,uncropPoint} from './player-selection.js';
 import {PoseEngineError} from './pose-engine.js';
 import {seekFrame} from './pose.js';
 import {workoutMeasurement} from './workout.js';
 
 export const WORKOUT_VIDEO_SECONDS=90;
 
-export async function readWorkoutFrame(detector,input,source,width,height,time) {
+async function inferWorkout(detector,canvas) {
+  let landmarks=[],worldLandmarks=[];
+  try {
+    await detector.read(canvas,result=>{
+      landmarks=result.landmarks||[];
+      worldLandmarks=result.worldLandmarks||[];
+    });
+  } catch {throw new PoseEngineError('The workout pose model could not read the image.');}
+  return {landmarks,worldLandmarks};
+}
+
+function workoutPoseQuality(points) {
+  const joints=[11,12,23,24,25,26,27,28];
+  return joints.reduce((sum,index)=>sum+(points[index]?.visibility??0),0)/joints.length;
+}
+
+export async function readWorkoutFrame(detector,input,source,width,height,time,{zoom,previous,detail=false,wide=false}={}) {
   if(!width||!height)throw new Error('The media has no usable image size.');
   const scale=Math.min(1,640/Math.max(width,height));
   const w=Math.max(1,Math.round(width*scale)),h=Math.max(1,Math.round(height*scale));
@@ -12,13 +29,42 @@ export async function readWorkoutFrame(detector,input,source,width,height,time) 
   const context=input.getContext('2d');
   if(!context)throw new Error('This browser could not prepare an image for analysis.');
   context.drawImage(source,0,0,input.width,input.height);
-  let landmarks=[],worldLandmarks=[];
-  try {
-    await detector.read(input,result=>{
-      landmarks=result.landmarks||[];
-      worldLandmarks=result.worldLandmarks||[];
-    });
-  } catch {throw new PoseEngineError('The workout pose model could not read the image.');}
+  let {landmarks,worldLandmarks}=await inferWorkout(detector,input);
+  if(!landmarks.length&&zoom&&Math.min(width,height)>=240) {
+    const torso=[11,12,23,24].map(i=>previous?.[i]).filter(p=>p?.visibility>=.55);
+    const center=torso.length>=2?{
+      x:torso.reduce((sum,p)=>sum+p.x,0)/torso.length,
+      y:torso.reduce((sum,p)=>sum+p.y,0)/torso.length,
+    }:{x:.5,y:.46};
+    const closer=zoom.getContext('2d');
+    const regions=detail?[[center,.60],[center,.43]]:[[center,.50]];
+    if(wide&&torso.length<2) {
+      regions.push([{x:.36,y:.42},.34],[{x:.64,y:.42},.34],
+        [{x:.36,y:.63},.34],[{x:.64,y:.63},.34]);
+    }
+    if(closer)for(const [aim,fraction] of regions) {
+      const crop=playerCrop(aim,fraction,width,height);
+      closer.drawImage(source,crop.x,crop.y,crop.side,crop.side,0,0,zoom.width,zoom.height);
+      const local=await inferWorkout(detector,zoom);
+      if(!local.landmarks.length)continue;
+      landmarks=local.landmarks.map(points=>points.map(p=>uncropPoint(p,crop)));
+      worldLandmarks=local.worldLandmarks;
+      break;
+    }
+    if(closer&&wide&&landmarks.length===1&&workoutPoseQuality(landmarks[0])<.65) {
+      const joints=[11,12,23,24].map(index=>landmarks[0][index]).filter(point=>point?.visibility>=.34);
+      if(joints.length>=2) {
+        const aim={x:joints.reduce((sum,p)=>sum+p.x,0)/joints.length,y:joints.reduce((sum,p)=>sum+p.y,0)/joints.length};
+        const crop=playerCrop(aim,.25,width,height);
+        closer.drawImage(source,crop.x,crop.y,crop.side,crop.side,0,0,zoom.width,zoom.height);
+        const closerPose=await inferWorkout(detector,zoom);
+        if(closerPose.landmarks.length===1&&workoutPoseQuality(closerPose.landmarks[0])>workoutPoseQuality(landmarks[0])) {
+          landmarks=closerPose.landmarks.map(points=>points.map(point=>uncropPoint(point,crop)));
+          worldLandmarks=closerPose.worldLandmarks;
+        }
+      }
+    }
+  }
   return {time,points:landmarks.length===1?landmarks[0]:null,
     world:landmarks.length===1&&worldLandmarks[0]?.length===33?worldLandmarks[0]:null,
     people:landmarks.length,aspect:width/height};

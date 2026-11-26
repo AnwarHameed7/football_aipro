@@ -3,7 +3,7 @@ import {modelWithin,withPoseFallback} from './pose-engine.js';
 import {render3d,skeleton} from './pose.js';
 import {changedScene,sceneSample} from './scene.js';
 import {photoWorkoutReview,readWorkoutFrame,scanWorkoutVideo,WORKOUT_VIDEO_SECONDS,workoutCueMoments,workoutFrameAt} from './workout-media.js';
-import {BODY_MEASUREMENTS_KEY,bodyMeasurementReview,measuredEntry} from './body-measurements.js';
+import {BODY_MEASUREMENTS_KEY,bodyMeasurementReview,measuredEntry,relativeFatMass} from './body-measurements.js';
 
 const $=id=>document.getElementById(id);
 function show(id,message) {
@@ -196,7 +196,10 @@ export function setupWorkout({blocked,onChange}) {
     const work=coach.mode==='plank'?`${summary.hold} s of aligned hold`:
       Object.hasOwn(exercises[coach.mode],'low')?`${summary.reps} estimated reps`:exercises[coach.mode].title;
     const range=summary.bottomRange;
-    show('workoutReview',`${work} · ${summary.coverage}% of sampled frames had a usable pose.`+
+    const partial=summary.shortReps?` ${summary.shortReps} shorter-range rep${summary.shortReps===1?'':'s'} included.`:'';
+    const noCycle=coach.good&&!summary.reps&&Object.hasOwn(exercises[coach.mode],'low')?
+      ' A rep needs a visible starting position, bend, and return.': '';
+    show('workoutReview',`${work} · ${summary.coverage}% of sampled frames had a usable pose.`+partial+noCycle+
       (range?` ${metricName(coach.mode)} at the bottom of counted reps: ${range[0]}–${range[1]}° in this view.`:''));
     const rows=$('workoutFindings');
     rows.replaceChildren();
@@ -244,15 +247,16 @@ export function setupWorkout({blocked,onChange}) {
   }
   function retry() {show('workoutStatus','Trying a more compatible pose model…');}
 
-  async function cameraLoop(detector,input,signal) {
+  async function cameraLoop(detector,input,zoom,signal) {
     coach.gap();
-    let frame=-1,lastSpoken='',spokenAt=-Infinity,recentCue='',cueAt=-Infinity;
+    let frame=-1,previous,lastSpoken='',spokenAt=-Infinity,recentCue='',cueAt=-Infinity;
     while(!signal.aborted) {
       if(video.readyState>=2&&video.videoWidth&&video.currentTime!==frame) {
         frame=video.currentTime;
         positionScreen(video.videoWidth,video.videoHeight);
         const now=performance.now()/1000;
-        const sample=await readWorkoutFrame(detector,input,video,video.videoWidth,video.videoHeight,now);
+        const sample=await readWorkoutFrame(detector,input,video,video.videoWidth,video.videoHeight,now,{zoom,previous});
+        if(sample.points)previous=sample.points;
         signal.throwIfAborted();
         const state=coach.read(sample.points,sample.aspect,now);
         draw(state?sample:null);
@@ -288,7 +292,8 @@ export function setupWorkout({blocked,onChange}) {
     const controller=begin(),signal=controller.signal;
     video.hidden=false;photo.hidden=true;video.controls=false;
     show('workoutStatus','Requesting camera access…');
-    const input=document.createElement('canvas');
+    const input=document.createElement('canvas'),zoom=document.createElement('canvas');
+    zoom.width=zoom.height=352;
     try {
       stream=await openWorkoutCamera(navigator.mediaDevices,signal);
       signal.throwIfAborted();
@@ -296,14 +301,14 @@ export function setupWorkout({blocked,onChange}) {
       video.srcObject=stream;
       await modelWithin(video.play(),signal,6500);
       show('workoutStatus','Loading the pose model…');
-      await withPoseFallback(detector=>cameraLoop(detector,input,signal),{signal,compatible:true,onRetry:retry});
+      await withPoseFallback(detector=>cameraLoop(detector,input,zoom,signal),{signal,compatible:true,onRetry:retry});
       show('workoutStatus','Workout ended');
     } catch(error) {
       show('workoutStatus',signal.aborted?(cameraLost?'Camera disconnected.':'Workout ended'):
         error.name==='NotAllowedError'?'Camera permission was denied. Allow camera access in your browser.':
         error.name==='NotFoundError'?'No camera was found.':error.message||'Workout camera could not start.');
     } finally {
-      input.width=input.height=1;
+      input.width=input.height=zoom.width=zoom.height=1;
       screen.hidden=true;
       if(coach.samples)renderSummary();
       finish();
@@ -313,7 +318,8 @@ export function setupWorkout({blocked,onChange}) {
   analyze.onclick=async()=>{
     if(job||blocked()||!ready)return;
     const controller=begin(),signal=controller.signal;
-    const input=document.createElement('canvas'),scene=document.createElement('canvas');
+    const input=document.createElement('canvas'),scene=document.createElement('canvas'),zoom=document.createElement('canvas');
+    zoom.width=zoom.height=352;
     scene.width=16;scene.height=9;
     const sceneContext=scene.getContext('2d',{willReadFrequently:true});
     const from=kind==='video'?Math.min(video.currentTime,Math.max(0,video.duration-.125)):0;
@@ -326,7 +332,7 @@ export function setupWorkout({blocked,onChange}) {
       }
       await withPoseFallback(async detector=>{
         if(kind==='photo') {
-          const sample=await readWorkoutFrame(detector,input,photo,photo.naturalWidth,photo.naturalHeight,0);
+          const sample=await readWorkoutFrame(detector,input,photo,photo.naturalWidth,photo.naturalHeight,0,{zoom,detail:true,wide:true});
           signal.throwIfAborted();
           draw(sample);
           const review=photoWorkoutReview(sample,mode.value);
@@ -338,9 +344,10 @@ export function setupWorkout({blocked,onChange}) {
         coach=new WorkoutCoach(mode.value);
         progress.hidden=false;
         progress.value=0;
-        let previousScene;
+        let previousScene,previous;
         frames=await scanWorkoutVideo(video,async time=>{
-          const sample=await readWorkoutFrame(detector,input,video,video.videoWidth,video.videoHeight,time);
+          const sample=await readWorkoutFrame(detector,input,video,video.videoWidth,video.videoHeight,time,{zoom,previous,detail:true,wide:Math.round((time-from)*6)%12===0});
+          if(sample.points)previous=sample.points;
           const current=sceneSample(input,sceneContext);
           sample.cut=changedScene(previousScene,current);
           previousScene=current;
@@ -367,7 +374,7 @@ export function setupWorkout({blocked,onChange}) {
       if(kind==='video'){video.pause();video.currentTime=from;}
       show('workoutStatus',signal.aborted?'Analysis cancelled.':'Could not finish analysis. '+error.message);
     } finally {
-      input.width=input.height=scene.width=scene.height=1;
+      input.width=input.height=scene.width=scene.height=zoom.width=zoom.height=1;
       finish();
       replay();
     }
@@ -433,6 +440,16 @@ export function setupBodyMeasurements() {
     if(!updated){show('bodyStatus','Check how the new values compare with the measurement already saved for this date.');return;}
     const next=[updated,...entries.filter(item=>!same(item))].sort((a,b)=>b.date.localeCompare(a.date)).slice(0,100);
     store(next,'Measurement saved in this browser.');
+  };
+  const estimator=$('bodyEstimateForm');
+  estimator.oninput=()=>show('bodyEstimateResult','');
+  estimator.onsubmit=event=>{
+    event.preventDefault();
+    const data=new FormData(estimator);
+    const result=relativeFatMass({height:Number(data.get('height')),waist:Number(data.get('waist')),
+      reference:data.get('reference'),adult:data.has('adult')});
+    show('bodyEstimateResult',result===null?'Check the measurements and formula settings. No estimate is available for these inputs.':
+      `About ${Math.round(result)}% body fat by the Relative Fat Mass formula. Treat this as a rough estimate.`);
   };
   render();
 }

@@ -21,6 +21,31 @@ function angle(a,b,c,aspect) {
   return Math.round(Math.acos(Math.max(-1,Math.min(1,(u[0]*v[0]+u[1]*v[1])/norm)))*180/Math.PI);
 }
 
+export function repeatedSteps(frames,aspect) {
+  const horizontal=[],vertical=[];
+  for(const frame of frames) {
+    const [a,b]=[frame.points?.[27],frame.points?.[28]];
+    if(!visibility(a)||!visibility(b))continue;
+    horizontal.push((a.x-b.x)*aspect);
+    vertical.push(a.y-b.y);
+  }
+  return [horizontal,vertical].some(values=>{
+    if(values.length<8)return false;
+    let sign=0,streak=0,confirmed=0,changes=0;
+    for(const value of values) {
+      const direction=value>.018?1:value<-.018?-1:0;
+      if(!direction)continue;
+      if(direction===sign)streak++;
+      else {sign=direction;streak=1;}
+      if(streak===2&&confirmed!==sign) {
+        if(confirmed)changes++;
+        confirmed=sign;
+      }
+    }
+    return changes>=2;
+  });
+}
+
 export function workoutMeasurement(points,mode,aspect,preferredSide) {
   if(!points||!Number.isFinite(aspect)||aspect<=0)return null;
   const candidates=sides.map((jointIds,side)=>{
@@ -57,9 +82,9 @@ const cues={
 export class WorkoutCoach {
   constructor(mode) {
     this.mode=mode;
-    this.phase='setup';this.side=undefined;this.reps=0;this.hold=0;this.good=0;this.samples=0;
-    this.last=null;this.lowest=null;this.lowTime=null;this.descended=null;
-    this.depths=[];this.aligned=false;this.notes=new Map();this.streak=0;this.flag='';
+    this.phase='setup';this.side=undefined;this.reps=0;this.shortReps=0;this.hold=0;this.good=0;this.samples=0;
+    this.last=null;this.lowest=null;this.lowTime=null;this.descended=null;this.topAngle=null;this.bendSamples=0;
+    this.depths=[];this.steps=[];this.aligned=false;this.notes=new Map();this.streak=0;this.flag='';
   }
 
   flagCue(flag) {
@@ -70,7 +95,7 @@ export class WorkoutCoach {
 
   gap() {
     this.last=null;this.phase='setup';this.side=undefined;this.lowest=this.lowTime=this.descended=null;
-    this.streak=0;this.flag='';this.aligned=false;
+    this.streak=0;this.flag='';this.aligned=false;this.topAngle=null;this.bendSamples=0;this.steps=[];
   }
 
   read(points,aspect,time) {
@@ -84,7 +109,11 @@ export class WorkoutCoach {
     this.last=time;
     let flag='',cue='';
     if((this.mode==='plank'||this.mode==='pushup')&&value.bodyLine!==null&&value.bodyLine<152)flag='body';
-    if(this.mode==='running'&&value.lean>=28)flag='running';
+    if(this.mode==='running') {
+      this.steps.push({points,time});
+      this.steps=this.steps.filter(frame=>time-frame.time<=2.8).slice(-16);
+      if(value.lean>=28&&repeatedSteps(this.steps,aspect))flag='running';
+    }
     if(this.mode==='hinge'&&value.kneeAngle!==null&&value.kneeAngle<114&&value.hipAngle>112)flag='hinge';
     if(this.mode==='plank') {
       const aligned=value.bodyLine>=160;
@@ -93,36 +122,42 @@ export class WorkoutCoach {
     } else if(Object.hasOwn(exercises[this.mode],'low')) {
       const {low,high}=exercises[this.mode];
       const atTop=value.metric>=high;
-      if(this.phase==='setup'&&atTop){this.phase='ready';this.lowest=null;}
-      if(this.phase==='ready'&&!atTop&&value.metric<=high-8) {
-        this.phase='lowering';this.descended=time;this.lowest=value.metric;
+      if((this.phase==='setup'||this.phase==='ready')&&atTop) {
+        this.phase='ready';
+        this.topAngle=value.metric;
       }
-      if(this.phase==='lowering') {
-        this.lowest=Math.min(this.lowest,value.metric);
-        if(value.metric<=low) {this.phase='bottom';this.lowTime=time;}
-        else if(atTop)this.phase='ready';
+      if(this.phase==='ready'&&value.metric<=high-8) {
+        this.phase='lowering';this.descended=time;this.lowest=value.metric;this.lowTime=time;
+        this.bendSamples=0;
       }
-      if(this.phase==='bottom') {
-        this.lowest=Math.min(this.lowest,value.metric);
-        if(atTop&&time-this.descended>=.45) {
+      if(this.phase==='lowering'&&!atTop) {
+        if(value.metric<this.lowest){this.lowest=value.metric;this.lowTime=time;}
+        const excursion=this.topAngle-value.metric;
+        if(excursion>=18)this.bendSamples++;
+      }
+      if(this.phase==='lowering'&&atTop) {
+        const range=this.topAngle-this.lowest;
+        const duration=time-this.descended;
+        if(duration>=.45&&range>=24&&this.bendSamples>=2) {
           this.reps++;
+          if(this.lowest>low)this.shortReps++;
           const earlier=this.depths.slice(-5);
           const difference=earlier.length>=3&&Math.abs(this.lowest-earlier.reduce((sum,v)=>sum+v,0)/earlier.length)>=18;
           this.depths.push(this.lowest);
-          cue=this.lowTime-this.descended<.5?cues.haste:difference?cues.repeat:'';
+          cue=this.lowTime-this.descended<.32?cues.haste:difference?cues.repeat:'';
           if(cue) {
             const key=cue===cues.haste?'haste':'repeat';
             this.notes.set(key,(this.notes.get(key)||0)+1);
           }
-          this.phase='ready';this.lowest=null;
-        } else if(atTop)this.phase='ready';
+        }
+        this.phase='ready';this.topAngle=value.metric;this.lowest=null;this.bendSamples=0;
       }
     }
-    return {value,cue:this.flagCue(flag)||cue,reps:this.reps,hold:Math.floor(this.hold),phase:this.phase};
+    return {value,cue:this.flagCue(flag)||cue,reps:this.reps,shortReps:this.shortReps,hold:Math.floor(this.hold),phase:this.phase};
   }
 
   summary() {
-    return {reps:this.reps,hold:Math.floor(this.hold),
+    return {reps:this.reps,shortReps:this.shortReps,hold:Math.floor(this.hold),
       bottomRange:this.depths.length?[Math.min(...this.depths),Math.max(...this.depths)]:null,coverage:this.samples?Math.round(100*this.good/this.samples):0,
       notes:[...this.notes].sort((a,b)=>b[1]-a[1]).slice(0,3).map(([key,count])=>({cue:cues[key],count}))};
   }

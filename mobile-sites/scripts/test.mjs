@@ -1,7 +1,7 @@
 import {photoWorkoutReview,readWorkoutFrame,scanWorkoutVideo,workoutCueMoments,workoutFrameAt} from '../web/workout-media.js';
 import {WorkoutCoach,workoutMeasurement} from '../web/workout.js';
 import {openWorkoutCamera} from '../web/workout-ui.js';
-import {bodyMeasurementReview,measuredEntry} from '../web/body-measurements.js';
+import {bodyMeasurementReview,measuredEntry,relativeFatMass} from '../web/body-measurements.js';
 import {ballMatchSample,mapCropBall} from '../web/ball-review.js';
 import {loadPlayerReference,referenceMemory,savePlayerReference,suggestedAnchor} from '../web/player-reference.js';
 import {changedScene} from '../web/scene.js';
@@ -73,6 +73,17 @@ await assert.rejects(scanWorkoutVideo({duration:3},async time=>({time}),{
   start:0,end:3,signal:cancelledScan.signal,seek:async()=>{},
   onFrame:()=>cancelledScan.abort(),
 }),{name:'AbortError'});
+let cropReads=0;
+const cropPose=await readWorkoutFrame({read(_surface,handle){
+  handle(++cropReads===1?{landmarks:[]}:{landmarks:[detectedPose],worldLandmarks:[detectedDepth]});
+}},cameraCanvas,{},1280,720,2,{zoom:{width:352,height:352,getContext:()=>({drawImage(){}})}});
+assert.equal(cropReads,2);
+assert.equal(cropPose.people,1);
+assert.notEqual(cropPose.points[11].x,detectedPose[11].x);
+assert.equal(relativeFatMass({height:180,waist:90,reference:'male',adult:true}),24);
+assert.equal(relativeFatMass({height:180,waist:90,reference:'female',adult:true}),36);
+assert.equal(relativeFatMass({height:180,waist:0,reference:'male',adult:true}),null);
+assert.equal(relativeFatMass({height:180,waist:90,reference:'male',adult:false}),null);
 const counting=new WorkoutCoach('squat');
 counting.read(workoutPose('top'),1,0);
 counting.read(workoutPose('halfway'),1,.2);
@@ -83,6 +94,18 @@ counting.read(null,1,1.6);
 assert.equal(counting.read(workoutPose('top'),1,1.8).reps,1);
 assert.deepEqual(counting.summary().bottomRange,[90,90]);
 assert.ok(counting.summary().coverage<100);
+const shorter=new WorkoutCoach('squat');
+shorter.read(workoutPose('top'),1,0);
+shorter.read(workoutPose('halfway'),1,.3);
+shorter.read(workoutPose('halfway'),1,.6);
+shorter.read(workoutPose('top'),1,1.0);
+assert.equal(shorter.summary().reps,1);
+assert.equal(shorter.summary().shortReps,1);
+const noisy=new WorkoutCoach('squat');
+noisy.read(workoutPose('top'),1,0);
+noisy.read(workoutPose('low'),1,.25);
+noisy.read(workoutPose('top'),1,.75);
+assert.equal(noisy.summary().reps,0);
 const plankCoach=new WorkoutCoach('plank');
 [0,.4,.8,1.2].forEach(time=>plankCoach.read(workoutPose('plank'),1,time));
 assert.equal(plankCoach.summary().hold,1);
@@ -103,8 +126,17 @@ for(const [mode,up,down] of [['hinge','top','hingeLow'],['pushup','plank','pushL
   assert.equal(exerciseCoach.read(visibleFrame(up),1,1.2).reps,1,mode);
 }
 const runningCoach=new WorkoutCoach('running');
-for(const time of [0,.2,.4])runningCoach.read(workoutPose('hingeLow'),1,time);
-assert.match(runningCoach.summary().notes[0].cue,/torso stayed/);
+for(const time of [0,.2,.4,.6])runningCoach.read(workoutPose('hingeLow'),1,time);
+assert.equal(runningCoach.summary().notes.length,0);
+const verifiedRun=new WorkoutCoach('running');
+for(let i=0;i<16;i++) {
+  const frame=workoutPose('hingeLow');
+  const direction=i%6<3?1:-1;
+  frame[27]={x:.5+direction*.06,y:.8,visibility:1};
+  frame[28]={x:.5-direction*.06,y:.8,visibility:1};
+  verifiedRun.read(frame,1,i*.125);
+}
+assert.match(verifiedRun.summary().notes[0].cue,/torso stayed/);
 assert.equal(runningCoach.summary().reps,0);
 const measured=measuredEntry({date:'2026-11-26',method:'Same scale',weight:'80',fat:25,muscle:36});
 assert.deepEqual(measured,{date:'2026-11-26',method:'Same scale',weight:80,fat:25,muscle:36});
@@ -299,14 +331,26 @@ const points=Array.from({length:33},()=>({x:.55,y:.3,z:0,visibility:1}));
 points[23]={x:.4,y:.5,z:0,visibility:1};
 points[24]=points[23];
 const frames=Array.from({length:16},(_,i)=>({time:i/8,points,world:null}));
-assert.equal(planFor('running',coachReview(frames,1.8).findings).items[0].key,'trunk');
-assert.equal(coachReview(frames.slice(0,6),1.8).findings.length,0);
+assert.equal(coachReview(frames,1.8).findings.length,0);
+const strideFrames=frames.map((frame,i)=>{
+  const direction=i%6<3?1:-1;
+  const moving=[...points];
+  moving[27]={x:.42+direction*.05,y:.8,z:0,visibility:1};
+  moving[28]={x:.42-direction*.05,y:.8,z:0,visibility:1};
+  return {...frame,points:moving};
+});
+assert.equal(planFor('running',coachReview(strideFrames,1.8).findings).items[0].key,'trunk');
+assert.equal(coachReview(strideFrames.slice(0,6),1.8).findings.length,0);
 points[25]={x:.39,y:.63,z:0,visibility:1};
 points[26]={x:.41,y:.65,z:0,visibility:1};
 points[27]={x:.37,y:.78,z:0,visibility:1};
 points[28]={x:.47,y:.77,z:0,visibility:1};
 assert.ok(metrics(frames[0],1.8).some(([name])=>name==='Left knee (2D)'));
 assert.match(attemptReview(frames,.5,'landing','right',1.8).findings[0].observation,/in the camera view/);
+const cameraCut=frames.map((frame,index)=>({...frame,cut:index===4}));
+assert.equal(attemptReview(cameraCut,.5,'landing','right',1.8).findings.length,0);
+const restoredCut=openPoseReview(savePoseReview({frames:cameraCut},'running',null,'right'),2);
+assert.equal(restoredCut.frames[4].cut,true);
 const checkedPose={time:1,points};
 const sportsBall=(x,y,score=.9)=>({categories:[{categoryName:'sports ball',score}],
   boundingBox:{originX:x-2,originY:y-2,width:4,height:4}});
@@ -339,7 +383,7 @@ const coverageExample=poseCoverage([
   {time:0,points},{time:.125,points:null},{time:.25,points:null},{time:.375,points},
 ],.49);
 assert.deepEqual(coverageExample,{start:0,end:.49,matched:2,total:4,gaps:[{start:.125,end:.375}]});
-assert.equal(coachReview(frames,1.8).moments[0].focus,'trunk');
+assert.equal(coachReview(strideFrames,1.8).moments[0].focus,'trunk');
 const uncertainReview=savePoseReview({frames:[{time:0,points,state:'tracked'},
   {time:.125,points:null,state:'ambiguous'}]},'running',null,'right');
 assert.equal(openPoseReview(uncertainReview,1).frames[1].state,'ambiguous');
@@ -360,6 +404,8 @@ assert.deepEqual([success,known,unclear],[1,2,1]);
 const ball=(time,x,nearYou=false,receiver=null)=>({time,ball:[x,.5],nearYou,receiver});
 const peer={team:'similar',x:.52,y:.5};
 const departure=[ball(1,.20,true),ball(1.25,.21,true),ball(1.5,.28)];
+assert.equal(suggestBallEvents([...departure,{...ball(1.75,.51,false,peer),identityUnclear:true},
+  ball(2,.52,false,peer),ball(2.25,.53,false,peer)],[]).length,0);
 assert.equal(suggestBallEvents([...departure,{...ball(1.75,.51,false,peer),cut:true},ball(2,.52,false,peer)],[]).length,0);
 assert.equal(suggestBallEvents([...departure,ball(1.75,.51,false,peer),ball(2,.52,false,peer)],[])[0].outcome,'Completed');
 assert.equal(suggestBallEvents([...departure,ball(2.3,.51,false,peer),ball(2.55,.52,false,peer)],[]).length,0);

@@ -112,6 +112,7 @@ export function suggestBallEvents(samples,goalPoints) {
   for(const sample of samples) {
     if(sample.cut||sample.time-previous>.35)reset();
     previous=sample.time;
+    if(sample.identityUnclear){reset();continue;}
     if(departure&&sample.time-departure.time>2)reset();
     if(!sample.ball) {
       near=nearStrong=0;receiver=null;goalHits=insideStrong=0;

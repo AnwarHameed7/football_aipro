@@ -31,6 +31,7 @@ export function savePoseReview(pose,mode,moment,foot) {
     Math.round(sample.time*1000),Math.max(0,states.indexOf(sample.state)),
     pointValues(sample.points),pointValues(sample.world),
     (sample.outline||[]).slice(0,5).map(contour=>encode(contour.slice(0,320).flat())),
+    sample.cut===true?1:0,
   ]);
   return {format:1,frames,mode,moment,foot,truncated:pose.frames.length>MAX_FRAMES,cues:(pose.cues||[]).slice(0,240)};
 }
@@ -50,7 +51,7 @@ export function openPoseReview(data,duration) {
       return [Array.from({length:coordinates.length/2},(_,i)=>[coordinates[i*2],coordinates[i*2+1]])];
     }):[];
     frames.push({time,state:points?(entry[1]===1?'reacquired':'tracked'):(entry[1]===3?'checking':entry[1]===4?'ambiguous':'lost'),
-      points,world:points?readPoints(entry[3]):null,outline});
+      points,world:points?readPoints(entry[3]):null,outline,cut:entry[5]===1});
   }
   if(!frames.some(frame=>frame.points))return null;
   const cues=Array.isArray(data.cues)?data.cues.slice(0,240).filter(item=>item&&validTime(item.time,duration)&&

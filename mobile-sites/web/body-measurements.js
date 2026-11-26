@@ -33,3 +33,11 @@ export function bodyMeasurementReview(entries,latest) {
   }
   return {fatMass,leanMass:fatMass===null?null:latest.weight-fatMass,changes};
 }
+
+// Relative Fat Mass (Woolcott and Bergman, 2018).
+export function relativeFatMass({height,waist,reference,adult}) {
+  if(adult!==true||!properNumber(height,100,250)||!properNumber(waist,40,200)||
+    !['male','female'].includes(reference))return null;
+  const estimate=64-20*(height/waist)+(reference==='female'?12:0);
+  return estimate>=3&&estimate<=65?estimate:null;
+}

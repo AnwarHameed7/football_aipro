@@ -284,6 +284,22 @@
       <button type="submit">Save measurement</button>
     </form>
     <p id="bodyStatus" class="meta" role="status"></p><p id="bodyTrend"></p><ul id="bodyEntries"></ul>
+    <details class="training-panel" id="bodyEstimatePanel">
+      <summary>Estimate body fat from waist and height</summary>
+      <p class="meta">Use measured height and a tape around your waist at the top of your hip bones, after a normal breath out. This formula gives a rough estimate for adults and does not measure muscle mass. <a href="https://doi.org/10.1038/s41598-018-29362-1" target="_blank" rel="noopener">Relative Fat Mass study</a></p>
+      <form id="bodyEstimateForm">
+        <div class="form-row">
+          <label>Height (cm) <input name="height" type="number" min="100" max="250" step=".1" required></label>
+          <label>Waist (cm) <input name="waist" type="number" min="40" max="200" step=".1" required></label>
+          <label>Formula reference <select name="reference" required>
+            <option value="">Choose reference</option><option value="male">Male</option><option value="female">Female</option>
+          </select></label>
+        </div>
+        <div class="row"><label><input type="checkbox" name="adult" required> I’m 20 or older</label>
+          <button type="submit">Estimate body fat</button></div>
+      </form>
+      <p id="bodyEstimateResult" role="status"></p>
+    </details>
   </section>
   <section class="panel library" id="libraryPanel">
     <div class="pane-header"><h2>Private review library</h2><button id="refreshLibrary" type="button">Refresh</button></div>

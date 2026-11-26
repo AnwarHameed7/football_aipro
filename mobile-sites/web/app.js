@@ -1239,7 +1239,7 @@ function renderCoaching() {
   }
   const coverage=`${coaching.matched} of ${coaching.total} samples matched your selection.`;
   if(!coaching.usableWindows) {
-    status('coachSummary',coverage+($('coachMode').value==='running'?' Film a longer clear side view to get a movement cue.':'Mark an attempt with clear footage before and after the moment.'));
+    status('coachSummary',coverage+($('coachMode').value==='running'?' No repeated steps with both ankles visible were confirmed. Try a clear side view of several strides.':'Mark an attempt with clear footage before and after the moment.'));
     return;
   }
   status('coachSummary',(skills[$('coachMode').value].manual?'Self-review. ':coverage)+(coaching.findings.length
