@@ -1,6 +1,8 @@
 import {exercises,WorkoutCoach} from './workout.js';
-import {modelWithin,PoseEngineError,withPoseFallback} from './pose-engine.js';
-import {skeleton} from './pose.js';
+import {modelWithin,withPoseFallback} from './pose-engine.js';
+import {render3d,skeleton} from './pose.js';
+import {changedScene,sceneSample} from './scene.js';
+import {photoWorkoutReview,readWorkoutFrame,scanWorkoutVideo,WORKOUT_VIDEO_SECONDS,workoutCueMoments,workoutFrameAt} from './workout-media.js';
 import {BODY_MEASUREMENTS_KEY,bodyMeasurementReview,measuredEntry} from './body-measurements.js';
 
 const $=id=>document.getElementById(id);
@@ -19,9 +21,11 @@ export async function openWorkoutCamera(media,signal) {
 }
 
 export function setupWorkout({blocked,onChange}) {
-  const video=$('workoutVideo'),canvas=$('workoutOutline'),mode=$('workoutExercise');
-  const start=$('startWorkout'),stop=$('stopWorkout');
+  const video=$('workoutVideo'),photo=$('workoutPhoto'),canvas=$('workoutOutline'),mode=$('workoutExercise');
+  const start=$('startWorkout'),stop=$('stopWorkout'),analyze=$('analyzeWorkoutMedia');
+  const screen=$('workoutScreen'),rotation=$('workoutRotation'),modelCanvas=$('workoutModel');
   let job=null,stream=null,coach=null,pendingSpeech=false;
+  let kind=null,mediaUrl=null,ready=false,frames=[],preview=null,cameraLost=false;
   const historyKey='football-ai-pro-workout-history-v1';
   let history=[];
   try {
@@ -40,48 +44,178 @@ export function setupWorkout({blocked,onChange}) {
   }
   for(const [id,exercise] of Object.entries(exercises))mode.add(new Option(exercise.title,id));
   mode.value='squat';
+
   function refresh() {
-    start.disabled=!!job||blocked();
+    const locked=!!job||blocked();
+    start.disabled=locked;
+    $('openWorkoutVideo').disabled=$('openWorkoutPhoto').disabled=locked;
+    stop.hidden=!job;
     stop.disabled=!job;
+    stop.textContent=kind==='camera'?'End workout':'Cancel analysis';
+    analyze.hidden=kind!=='video'&&kind!=='photo';
+    analyze.disabled=locked||!ready;
+    analyze.textContent=kind==='photo'?'Analyze photo':'Analyze from playhead';
     mode.disabled=!!job;
+    video.controls=kind==='video'&&!job;
+    $('workoutSource').textContent=kind==='camera'?'Live camera':kind==='video'?'Workout video':kind==='photo'?'Workout photo':'No media selected';
   }
-  function choose() {show('workoutSetup',exercises[mode.value].view);}
-  function stopCamera() {
-    job?.abort();
-    release(stream);
-    stream=null;
-    video.pause();
-    video.srcObject=null;
+
+  function positionScreen(width,height) {
+    const scale=Math.min(1,640/Math.max(width,height));
+    const w=Math.max(1,Math.round(width*scale)),h=Math.max(1,Math.round(height*scale));
+    if(canvas.width!==w||canvas.height!==h) {
+      canvas.width=w;canvas.height=h;
+      screen.style.aspectRatio=`${w} / ${h}`;
+      screen.classList.toggle('portrait',h>w);
+    }
+  }
+  function updateModel() {
+    render3d(modelCanvas,preview,Number(rotation.value),{workout:true});
+    rotation.disabled=!preview?.world;
+    for(const button of $('workoutViews').querySelectorAll('button'))button.disabled=rotation.disabled;
+    show('workoutDepthStatus',preview?.world?'Estimated depth from the selected frame.':preview?.points?
+      'This model returned 2D landmarks. Use the overlay to review them.':'A pose appears here after analysis.');
+  }
+  function draw(sample) {
+    const ctx=canvas.getContext('2d');
+    if(ctx) {
+      ctx.clearRect(0,0,canvas.width,canvas.height);
+      if(sample?.points)skeleton(ctx,{x:0,y:0,w:canvas.width,h:canvas.height},sample.points);
+    }
+    if(preview!==sample){preview=sample;updateModel();}
+  }
+  rotation.oninput=updateModel;
+  for(const button of $('workoutViews').querySelectorAll('button'))button.onclick=()=>{
+    rotation.value=button.dataset.view;
+    updateModel();
+  };
+  let drag;
+  modelCanvas.onpointerdown=event=>{
+    if(rotation.disabled)return;
+    drag={x:event.clientX,angle:Number(rotation.value)};
+    modelCanvas.setPointerCapture(event.pointerId);
+  };
+  modelCanvas.onpointermove=event=>{
+    if(!drag)return;
+    const angle=drag.angle+(event.clientX-drag.x)*.8;
+    rotation.value=((angle+180)%360+360)%360-180;
+    updateModel();
+  };
+  modelCanvas.onpointerup=modelCanvas.onpointercancel=()=>{drag=null;};
+
+  function metricName(exercise) {
+    return {hinge:'Hip angle',pushup:'Elbow angle',plank:'Body line',running:'Trunk tilt from vertical',
+      free:'Visible joint'}[exercise]||'Knee angle';
+  }
+
+  function clearResult() {
+    frames=[];
+    draw(null);
+    $('workoutSummary').hidden=true;
+    show('workoutMetric','');
+    show('workoutCue','');
+  }
+  function showReady() {
+    if(kind==='photo') {
+      ready=!!photo.naturalWidth;
+      if(ready)positionScreen(photo.naturalWidth,photo.naturalHeight);
+    } else if(kind==='video') {
+      ready=!!video.videoWidth&&Number.isFinite(video.duration)&&video.duration>0;
+      if(ready)positionScreen(video.videoWidth,video.videoHeight);
+    }
+    if(ready)show('workoutStatus',kind==='photo'?'Photo ready. Choose the exercise, then analyze.':
+      'Video ready. Choose the exercise and position the playhead where you want the review to start.');
+    refresh();
+  }
+  function choose() {
+    show('workoutSetup',exercises[mode.value].view);
+    if(ready&&(kind==='video'||kind==='photo')){clearResult();showReady();}
+  }
+  function releaseCamera() {
+    release(stream);stream=null;
+    if(video.srcObject){video.pause();video.srcObject=null;}
     if(pendingSpeech&&window.speechSynthesis)window.speechSynthesis.cancel();
     pendingSpeech=false;
   }
-  const pauseIfHidden=()=>{if(document.hidden)stopCamera();};
-  document.addEventListener('visibilitychange',pauseIfHidden);
-  window.addEventListener('pagehide',stopCamera);
-
-  function draw(points) {
-    const context=canvas.getContext('2d');
-    if(!context)return;
-    context.clearRect(0,0,canvas.width,canvas.height);
-    if(points)skeleton(context,{x:0,y:0,w:canvas.width,h:canvas.height},points);
+  function stopJob() {
+    job?.abort();
+    releaseCamera();
   }
+  function clearMedia() {
+    video.pause();
+    video.removeAttribute('src');video.load();
+    photo.removeAttribute('src');
+    if(mediaUrl)URL.revokeObjectURL(mediaUrl);
+    mediaUrl=null;
+  }
+  document.addEventListener('visibilitychange',()=>{if(document.hidden)stopJob();});
+  window.addEventListener('pagehide',stopJob);
+
+  function selectFile(input,type) {
+    const file=input.files[0];input.value='';
+    if(!file||job||blocked())return;
+    kind=null;ready=false;
+    clearMedia();clearResult();
+    kind=type;
+    $('workoutStage').hidden=false;
+    screen.hidden=false;
+    photo.hidden=type!=='photo';
+    video.hidden=type!=='video';
+    video.controls=type==='video';
+    mediaUrl=URL.createObjectURL(file);
+    show('workoutStatus',type==='photo'?'Opening photo…':'Opening video…');
+    if(type==='photo')photo.src=mediaUrl;else video.src=mediaUrl;
+    refresh();
+  }
+  $('openWorkoutVideo').onchange=event=>selectFile(event.target,'video');
+  $('openWorkoutPhoto').onchange=event=>selectFile(event.target,'photo');
+  video.addEventListener('loadedmetadata',()=>{if(kind==='video')showReady();});
+  photo.onload=()=>{if(kind==='photo')showReady();};
+  video.addEventListener('error',()=>{
+    if(kind==='video'&&mediaUrl){ready=false;clearResult();show('workoutStatus','Could not read this video. Try an H.264 MP4.');refresh();}
+  });
+  photo.onerror=()=>{
+    if(kind==='photo'&&mediaUrl){ready=false;clearResult();show('workoutStatus','Could not read this photo. Try JPEG, PNG, or WebP.');refresh();}
+  };
+  const replay=()=>{
+    if(kind!=='video'||job||!frames.length)return;
+    const sample=workoutFrameAt(frames,video.currentTime);
+    draw(sample);
+    if(sample?.cue)show('workoutCue',sample.cue);
+    else show('workoutCue',sample?.points?'':video.duration>frames.at(-1).time+.28?
+      'Move the playhead to an unreviewed passage and analyze again.':'No analyzed pose at this timestamp.');
+    if(sample?.metric!==undefined)show('workoutMetric',`${metricName(mode.value)} ${sample.metric}° in this view`);
+    else show('workoutMetric','');
+  };
+  video.addEventListener('timeupdate',replay);
+  video.addEventListener('seeked',replay);
+
   function renderSummary() {
-    const summary=coach?.summary();
-    const report=$('workoutSummary'),rows=$('workoutFindings');
-    report.hidden=!summary;
-    rows.replaceChildren();
-    if(!summary)return;
+    const summary=coach.summary();
+    $('workoutSummary').hidden=false;
     const work=coach.mode==='plank'?`${summary.hold} s of aligned hold`:
       Object.hasOwn(exercises[coach.mode],'low')?`${summary.reps} estimated reps`:exercises[coach.mode].title;
     const range=summary.bottomRange;
-    const joint=coach.mode==='hinge'?'Hip':coach.mode==='pushup'?'Elbow':'Knee';
     show('workoutReview',`${work} · ${summary.coverage}% of sampled frames had a usable pose.`+
-      (range?` ${joint} angle at the bottom of counted reps: ${range[0]}–${range[1]}° in this view.`:''));
-
+      (range?` ${metricName(coach.mode)} at the bottom of counted reps: ${range[0]}–${range[1]}° in this view.`:''));
+    const rows=$('workoutFindings');
+    rows.replaceChildren();
     for(const note of summary.notes) {
       const item=document.createElement('li');
       item.textContent=`${note.cue} (${note.count} detection${note.count===1?'':'s'})`;
       rows.append(item);
+    }
+    const moments=kind==='video'?workoutCueMoments(frames):[];
+    const reviewList=$('workoutMomentList');
+    reviewList.replaceChildren();
+    $('workoutMoments').hidden=!moments.length;
+    for(const moment of moments) {
+      const item=document.createElement('li'),jump=document.createElement('button');
+      jump.type='button';
+      jump.textContent=`Watch ${moment.time.toFixed(1)} s`;
+      jump.onclick=()=>{video.pause();video.currentTime=moment.time;screen.scrollIntoView({block:'nearest'});};
+      item.append(jump,' ',moment.cue);
+      reviewList.append(item);
     }
     if(coach.good) {
       const exercise=exercises[coach.mode].title;
@@ -91,99 +225,156 @@ export function setupWorkout({blocked,onChange}) {
       drawHistory();
     }
   }
-  stop.onclick=stopCamera;
-  mode.onchange=choose;
-  start.onclick=async()=>{
-    if(job||blocked())return;
+
+  function begin() {
     const controller=new AbortController();
     job=controller;
-    const signal=controller.signal;
-    let cameraLost=false,lastSpoken='',spokenAt=-Infinity,recentCue='',cueAt=-Infinity;
     coach=new WorkoutCoach(mode.value);
-    $('workoutSummary').hidden=true;
-    $('workoutScreen').hidden=false;
-    show('workoutStatus','Requesting camera access…');
-    show('workoutCue','Stand where the camera can see you.');
-    show('workoutMetric','');
+    clearResult();
+    $('workoutStage').hidden=false;
+    screen.hidden=false;
     refresh();onChange();
+    return controller;
+  }
+  function finish() {
+    releaseCamera();
+    job=null;
+    $('workoutProgress').hidden=true;
+    refresh();onChange();
+  }
+  function retry() {show('workoutStatus','Trying a more compatible pose model…');}
+
+  async function cameraLoop(detector,input,signal) {
+    coach.gap();
+    let frame=-1,lastSpoken='',spokenAt=-Infinity,recentCue='',cueAt=-Infinity;
+    while(!signal.aborted) {
+      if(video.readyState>=2&&video.videoWidth&&video.currentTime!==frame) {
+        frame=video.currentTime;
+        positionScreen(video.videoWidth,video.videoHeight);
+        const now=performance.now()/1000;
+        const sample=await readWorkoutFrame(detector,input,video,video.videoWidth,video.videoHeight,now);
+        signal.throwIfAborted();
+        const state=coach.read(sample.points,sample.aspect,now);
+        draw(state?sample:null);
+        if(!state) {
+          show('workoutStatus',sample.people>1?'One person at a time. Ask others to step out of view.':'Waiting for a clear pose');
+          show('workoutCue',exercises[coach.mode].view);show('workoutMetric','');recentCue='';
+        } else {
+          show('workoutStatus','Camera coaching active');
+          const count=coach.mode==='plank'?`${state.hold} s aligned hold · `:
+            Object.hasOwn(exercises[coach.mode],'low')?`${state.reps} estimated reps · `:'';
+          show('workoutMetric',`${count}${metricName(coach.mode)} ${state.value.metric}° (camera view)`);
+          if(state.cue){recentCue=state.cue;cueAt=now;}
+          const instruction=(now-cueAt<3?recentCue:'')||(coach.mode==='plank'?'Check that your position stays steady.':
+            coach.mode==='running'?'Keep your pace and camera angle steady for comparison.':
+            state.phase==='setup'&&Object.hasOwn(exercises[coach.mode],'low')?
+              'Return to the starting position to begin counting.':'Keep the movement controlled.');
+          show('workoutCue',instruction);
+          if(state.cue&&$('workoutVoice').checked&&window.speechSynthesis&&window.SpeechSynthesisUtterance&&
+            now-spokenAt>=5&&(state.cue!==lastSpoken||now-spokenAt>=12)) {
+            pendingSpeech=true;lastSpoken=state.cue;spokenAt=now;
+            window.speechSynthesis.speak(new window.SpeechSynthesisUtterance(state.cue));
+          }
+        }
+      }
+      await new Promise(resolve=>setTimeout(resolve,115));
+    }
+  }
+
+  start.onclick=async()=>{
+    if(job||blocked())return;
+    kind=null;ready=false;clearMedia();
+    kind='camera';cameraLost=false;
+    const controller=begin(),signal=controller.signal;
+    video.hidden=false;photo.hidden=true;video.controls=false;
+    show('workoutStatus','Requesting camera access…');
+    const input=document.createElement('canvas');
     try {
       stream=await openWorkoutCamera(navigator.mediaDevices,signal);
       signal.throwIfAborted();
-      for(const track of stream.getVideoTracks())track.addEventListener('ended',()=>{
-        cameraLost=true;stopCamera();
-      },{once:true});
+      for(const track of stream.getVideoTracks())track.addEventListener('ended',()=>{cameraLost=true;stopJob();},{once:true});
       video.srcObject=stream;
       await modelWithin(video.play(),signal,6500);
       show('workoutStatus','Loading the pose model…');
-      const input=document.createElement('canvas'),ctx=input.getContext('2d');
-      try {
-        await withPoseFallback(async detector=>{
-          coach.gap();
-          let frame=-1;
-          while(!signal.aborted) {
-            if(video.readyState>=2&&video.videoWidth&&video.currentTime!==frame) {
-              frame=video.currentTime;
-              const scale=Math.min(1,480/Math.max(video.videoWidth,video.videoHeight));
-              const width=Math.round(video.videoWidth*scale),height=Math.round(video.videoHeight*scale);
-              if(input.width!==width||input.height!==height||canvas.width!==width||canvas.height!==height) {
-                input.width=canvas.width=width;input.height=canvas.height=height;
-                $('workoutScreen').style.aspectRatio=`${width} / ${height}`;
-              }
-              if(!ctx)throw new Error('The browser could not open a camera frame for analysis.');
-              ctx.drawImage(video,0,0,width,height);
-              let poses=[];
-              try {await detector.read(input,result=>{poses=result.landmarks;});}
-              catch {throw new PoseEngineError('The workout pose model stopped reading frames.');}
-              signal.throwIfAborted();
-              const points=poses.length===1?poses[0]:null;
-              const state=coach.read(points,width/height,performance.now()/1000);
-              draw(state?points:null);
-              if(!state) {
-                show('workoutStatus',poses.length>1?'One person at a time. Ask others to step out of view.':'Waiting for a clear pose');
-                show('workoutCue',exercises[coach.mode].view);
-                show('workoutMetric','');
-                recentCue='';
-              } else {
-                show('workoutStatus','Camera coaching active');
-                const count=coach.mode==='plank'?`${state.hold} s aligned hold`:Object.hasOwn(exercises[coach.mode],'low')?`${state.reps} estimated reps · `:'';
-                const measure=coach.mode==='hinge'?'Hip angle':coach.mode==='pushup'?'Elbow angle':
-                  coach.mode==='plank'?'Body line':coach.mode==='running'?'Trunk tilt from vertical':coach.mode==='free'?'Visible joint':'Knee angle';
-                show('workoutMetric',`${count}${coach.mode==='plank'?' · ':''}${measure} ${state.value.metric}° (camera view)`);
-                const now=performance.now()/1000;
-                if(state.cue){recentCue=state.cue;cueAt=now;}
-                const instruction=(now-cueAt<3?recentCue:'')||(coach.mode==='plank'?'Hold as long as you can keep your position steady.':
-                  coach.mode==='free'?'Move slowly enough for the camera to follow.':
-                  coach.mode==='running'?'Keep your pace and camera angle steady for comparison.':
-                  state.phase==='setup'?'Return to the starting position to begin counting.':'Keep the movement controlled.');
-                show('workoutCue',instruction);
-                if(state.cue&&$('workoutVoice').checked&&window.speechSynthesis&&window.SpeechSynthesisUtterance&&
-                    now-spokenAt>=5&&(state.cue!==lastSpoken||now-spokenAt>=12)) {
-                  const speech=new SpeechSynthesisUtterance(state.cue);
-                  pendingSpeech=true;lastSpoken=state.cue;spokenAt=now;
-                  window.speechSynthesis.speak(speech);
-                }
-              }
-            }
-            await new Promise(resolve=>setTimeout(resolve,115));
-          }
-        },{signal,compatible:true,onRetry:()=>show('workoutStatus','Trying a more compatible pose model…')});
-      } finally {input.width=input.height=1;}
-      show('workoutStatus',cameraLost?'Camera disconnected. Start again to continue.':'Workout ended');
+      await withPoseFallback(detector=>cameraLoop(detector,input,signal),{signal,compatible:true,onRetry:retry});
+      show('workoutStatus','Workout ended');
     } catch(error) {
-      const message=signal.aborted?(cameraLost?'Camera disconnected.':'Workout ended'):
-        error.name==='NotAllowedError'?'Camera permission was denied. Allow access in your browser to start.':
-        error.name==='NotFoundError'?'No camera was found.':error.message;
-      show('workoutStatus',message||'Workout camera could not start.');
+      show('workoutStatus',signal.aborted?(cameraLost?'Camera disconnected.':'Workout ended'):
+        error.name==='NotAllowedError'?'Camera permission was denied. Allow camera access in your browser.':
+        error.name==='NotFoundError'?'No camera was found.':error.message||'Workout camera could not start.');
     } finally {
-      stopCamera();
-      draw(null);
-      $('workoutScreen').hidden=true;
+      input.width=input.height=1;
+      screen.hidden=true;
       if(coach.samples)renderSummary();
-      if(job===controller)job=null;
-      refresh();onChange();
+      finish();
     }
   };
-  choose();refresh();drawHistory();
+
+  analyze.onclick=async()=>{
+    if(job||blocked()||!ready)return;
+    const controller=begin(),signal=controller.signal;
+    const input=document.createElement('canvas'),scene=document.createElement('canvas');
+    scene.width=16;scene.height=9;
+    const sceneContext=scene.getContext('2d',{willReadFrequently:true});
+    const from=kind==='video'?Math.min(video.currentTime,Math.max(0,video.duration-.125)):0;
+    const progress=$('workoutProgress');
+    show('workoutStatus','Loading the pose model…');
+    try {
+      if(kind==='video') {
+        if(video.readyState<2)await modelWithin(video.play(),signal,5000);
+        video.pause();
+      }
+      await withPoseFallback(async detector=>{
+        if(kind==='photo') {
+          const sample=await readWorkoutFrame(detector,input,photo,photo.naturalWidth,photo.naturalHeight,0);
+          signal.throwIfAborted();
+          draw(sample);
+          const review=photoWorkoutReview(sample,mode.value);
+          show('workoutStatus',sample.people>1?'Use a photo with one person.':sample.points?'Photo analyzed':'No clear pose found in this photo.');
+          show('workoutMetric',review?`${metricName(mode.value)} ${review.measurement.metric}° in this view`:'');
+          show('workoutCue',review?.cue||(review?'Use a video to review reps, pace, and consistency.':exercises[mode.value].view));
+          return;
+        }
+        coach=new WorkoutCoach(mode.value);
+        progress.hidden=false;
+        progress.value=0;
+        let previousScene;
+        frames=await scanWorkoutVideo(video,async time=>{
+          const sample=await readWorkoutFrame(detector,input,video,video.videoWidth,video.videoHeight,time);
+          const current=sceneSample(input,sceneContext);
+          sample.cut=changedScene(previousScene,current);
+          previousScene=current;
+          return sample;
+        },{
+          start:from,end:video.duration,signal,onFrame:(sample,value)=>{
+            if(sample.cut)coach.gap();
+            const state=coach.read(sample.points,sample.aspect,sample.time);
+            if(state){sample.metric=state.value.metric;sample.cue=state.cue;}
+            progress.value=value;
+            const percent=Math.floor(value*20)*5;
+            show('workoutStatus',`Analyzing video · ${percent}%`);
+          },
+        });
+        renderSummary();
+        show('workoutStatus',coach.good?
+          `Analyzed ${from.toFixed(1)}–${frames.at(-1).time.toFixed(1)} s. Play or scrub to review.`:
+          'No usable pose for this exercise. Try a clearer view with one person.');
+        if(video.duration>from+WORKOUT_VIDEO_SECONDS)
+          show('workoutCue','To review the next passage, move the playhead and analyze again.');
+        video.currentTime=from;
+      },{signal,compatible:true,onRetry:retry});
+    } catch(error) {
+      if(kind==='video'){video.pause();video.currentTime=from;}
+      show('workoutStatus',signal.aborted?'Analysis cancelled.':'Could not finish analysis. '+error.message);
+    } finally {
+      input.width=input.height=scene.width=scene.height=1;
+      finish();
+      replay();
+    }
+  };
+  stop.onclick=stopJob;
+  mode.onchange=choose;
+  choose();refresh();drawHistory();updateModel();
   return {get active(){return !!job;},refresh};
 }
 

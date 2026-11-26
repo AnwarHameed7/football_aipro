@@ -1,3 +1,4 @@
+import {photoWorkoutReview,readWorkoutFrame,scanWorkoutVideo,workoutCueMoments,workoutFrameAt} from '../web/workout-media.js';
 import {WorkoutCoach,workoutMeasurement} from '../web/workout.js';
 import {openWorkoutCamera} from '../web/workout-ui.js';
 import {bodyMeasurementReview,measuredEntry} from '../web/body-measurements.js';
@@ -37,6 +38,41 @@ const workoutPose=(style,side=0)=>{
 assert.equal(workoutMeasurement(workoutPose('top'),'squat',1).metric,180);
 assert.equal(workoutMeasurement(workoutPose('low'),'squat',1).metric,90);
 assert.equal(workoutMeasurement(workoutPose('top'),'pushup',1),null);
+const photoReview=photoWorkoutReview({points:workoutPose('bent'),aspect:1},'plank');
+assert.match(photoReview.cue,/hips sit away/);
+assert.ok(photoReview.measurement.bodyLine<152);
+assert.equal(photoWorkoutReview({points:null,aspect:1},'squat'),null);
+const cameraCanvas={width:0,height:0,getContext:()=>({drawImage(){}})};
+const detectedPose=workoutPose('plank'), detectedDepth=workoutPose('plank');
+const detectorWithWorld={read(_surface,handle){handle({landmarks:[detectedPose],worldLandmarks:[detectedDepth]});}};
+const measuredFrame=await readWorkoutFrame(detectorWithWorld,cameraCanvas,{},1280,720,2);
+assert.equal(measuredFrame.world,detectedDepth);
+assert.equal(cameraCanvas.width,640);
+assert.equal(cameraCanvas.height,360);
+assert.equal(measuredFrame.aspect,1280/720);
+const twoPeople={read(_surface,handle){handle({landmarks:[detectedPose,detectedPose],worldLandmarks:[detectedDepth,detectedDepth]});}};
+const unclearFrame=await readWorkoutFrame(twoPeople,cameraCanvas,{},640,720,0);
+assert.equal(unclearFrame.points,null);
+assert.equal(unclearFrame.world,null);
+const mediaProgress=[],jumped=[];
+const examFrames=await scanWorkoutVideo({duration:160},async time=>({time,points:detectedPose}),{
+  start:11,end:159,signal:new AbortController().signal,seek:async(_video,time)=>jumped.push(time),
+  onFrame:(_frame,fraction)=>mediaProgress.push(fraction),
+});
+assert.equal(jumped[0],11);
+assert.equal(jumped.at(-1),101);
+assert.equal(examFrames.length,541);
+assert.equal(mediaProgress.at(-1),1);
+assert.equal(workoutFrameAt(examFrames,500),null);
+assert.equal(workoutFrameAt(examFrames,11.05),examFrames[0]);
+assert.deepEqual(workoutCueMoments([
+  {time:1,cue:'Slow down'},{time:1.25,cue:'Slow down'},{time:2.5,cue:'Slow down'},
+]),[{time:1,end:1.25,cue:'Slow down'},{time:2.5,end:2.5,cue:'Slow down'}]);
+const cancelledScan=new AbortController();
+await assert.rejects(scanWorkoutVideo({duration:3},async time=>({time}),{
+  start:0,end:3,signal:cancelledScan.signal,seek:async()=>{},
+  onFrame:()=>cancelledScan.abort(),
+}),{name:'AbortError'});
 const counting=new WorkoutCoach('squat');
 counting.read(workoutPose('top'),1,0);
 counting.read(workoutPose('halfway'),1,.2);

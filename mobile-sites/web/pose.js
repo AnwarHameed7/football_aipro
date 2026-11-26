@@ -342,8 +342,9 @@ export function skeleton(ctx,rect,points) {
   }
   ctx.restore();
 }
-export function render3d(canvas,sample,angleDegrees) {
+export function render3d(canvas,sample,angleDegrees,{workout=false}={}) {
   const ctx=canvas.getContext('2d'),w=canvas.width,h=canvas.height;
+  if(!ctx)return;
   ctx.clearRect(0,0,w,h);
   ctx.strokeStyle='#396158';ctx.lineWidth=1;
   for(let i=-4;i<=4;i++) {ctx.beginPath();ctx.moveTo(w/2+i*28,h*.66);ctx.lineTo(w/2+i*66,h*.97);ctx.stroke();}
@@ -356,7 +357,7 @@ export function render3d(canvas,sample,angleDegrees) {
   const rad=angleDegrees*Math.PI/180;
   const projected=sample.world.map(p=>{
     const x=p.x*Math.cos(rad)-p.z*Math.sin(rad),z=p.x*Math.sin(rad)+p.z*Math.cos(rad);
-    const scale=169/(1+Math.max(-.45,Math.min(.45,z))*.35);
+    const scale=(workout?222:169)/(1+Math.max(-.45,Math.min(.45,z))*.35);
     return {x:w/2+x*scale,y:h*.51+(p.y-z*.12)*scale,z};
   });
   for(const [a,b] of [...BONES].sort(([a,b],[c,d])=>(projected[c].z+projected[d].z)-(projected[a].z+projected[b].z))) {
@@ -364,6 +365,13 @@ export function render3d(canvas,sample,angleDegrees) {
     const p=projected[a],q=projected[b];
     ctx.lineWidth=5;ctx.lineCap='round';ctx.strokeStyle=p.z+q.z>.15?'#6ba595':'#b1f58b';
     ctx.shadowColor='#7dffb470';ctx.shadowBlur=12;
+    if(workout) {
+      const near=p.z+q.z<=.15;
+      const color=a%2===0&&b%2===0?'#83dcf3':'#b8f693';
+      ctx.shadowBlur=0;ctx.strokeStyle='#0b1311';ctx.lineWidth=near?10:8;
+      ctx.beginPath();ctx.moveTo(p.x,p.y);ctx.lineTo(q.x,q.y);ctx.stroke();
+      ctx.strokeStyle=color;ctx.lineWidth=near?6:4;
+    }
     ctx.beginPath();ctx.moveTo(p.x,p.y);ctx.lineTo(q.x,q.y);ctx.stroke();
     ctx.shadowBlur=0;ctx.fillStyle='#edffd7';ctx.beginPath();ctx.arc(p.x,p.y,4,0,Math.PI*2);ctx.fill();
   }

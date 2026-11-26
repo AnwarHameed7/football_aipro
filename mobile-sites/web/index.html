@@ -223,26 +223,49 @@
       <ul id="teamFormation"></ul><ul id="teamPossession"></ul><ul id="teamTransfers"></ul>
     </details>
   </section>
-  <section class="panel technique" id="workoutPanel" aria-labelledby="workoutTitle">
-    <div class="pane-header"><h2 id="workoutTitle">Solo workout coach</h2></div>
-    <div class="row">
-      <label>Exercise <select id="workoutExercise"></select></label>
+  <section class="panel technique workout-panel" id="workoutPanel" aria-labelledby="workoutTitle">
+    <div class="pane-header workout-header">
+      <div><h2 id="workoutTitle">Solo workout coach</h2><p class="meta">Review one athlete at a time. Photos and videos are processed on this device.</p></div>
+      <span id="workoutSource" class="workout-source"></span>
+    </div>
+    <div class="workout-inputs">
       <button id="startWorkout" class="primary" type="button">Start camera</button>
-      <button id="stopWorkout" type="button" disabled>End workout</button>
-      <label><input id="workoutVoice" type="checkbox">Speak cues</label>
+      <label class="button">Open video<input id="openWorkoutVideo" type="file" accept="video/*"></label>
+      <label class="button">Open photo<input id="openWorkoutPhoto" type="file" accept="image/*"></label>
+    </div>
+    <div class="row workout-settings">
+      <label>Exercise <select id="workoutExercise"></select></label>
+      <label><input id="workoutVoice" type="checkbox">Speak live cues</label>
+      <button id="analyzeWorkoutMedia" class="primary" type="button" hidden>Analyze</button>
+      <button id="stopWorkout" type="button" hidden disabled>End workout</button>
     </div>
     <p class="meta" id="workoutSetup"></p>
-    <p class="meta">Use a fixed camera and train one person at a time. The camera is processed on this device.</p>
-    <div class="screen workout-screen" id="workoutScreen" hidden>
-      <video id="workoutVideo" playsinline muted aria-label="Live workout camera"></video>
-      <canvas id="workoutOutline" aria-label="Live pose overlay"></canvas>
+    <div id="workoutStage" class="workout-stage" hidden>
+      <div class="screen workout-screen" id="workoutScreen" hidden>
+        <video id="workoutVideo" playsinline muted preload="metadata" aria-label="Workout camera or video"></video>
+        <img id="workoutPhoto" alt="Your workout photo" hidden>
+        <canvas id="workoutOutline" aria-label="Workout pose overlay"></canvas>
+      </div>
+      <div class="workout-pose-card">
+        <h3>3D pose</h3>
+        <canvas id="workoutModel" width="480" height="360" aria-label="Rotatable estimated three-dimensional pose"></canvas>
+        <div class="row workout-views" id="workoutViews">
+          <button type="button" data-view="0" disabled>Front</button>
+          <button type="button" data-view="90" disabled>Side</button>
+          <button type="button" data-view="180" disabled>Back</button>
+        </div>
+        <label class="workout-rotation">Rotate pose <input id="workoutRotation" type="range" min="-180" max="180" step="1" value="20" disabled></label>
+        <p class="meta" id="workoutDepthStatus"></p>
+      </div>
     </div>
-    <div class="live-coach" aria-label="Live form feedback">
-      <p id="workoutStatus" role="status">Camera off</p>
-      <p id="workoutCue" role="status"></p><p id="workoutMetric" class="meta"></p>
+    <div class="live-coach workout-feedback" aria-label="Workout form feedback">
+      <p id="workoutStatus" role="status">Choose a camera, video, or photo to begin.</p>
+      <p id="workoutCue"></p><p id="workoutMetric"></p>
+      <progress id="workoutProgress" max="1" aria-label="Workout analysis progress" hidden></progress>
     </div>
     <div id="workoutSummary" hidden>
       <h3>Workout review</h3><p id="workoutReview"></p><ul id="workoutFindings"></ul>
+      <div id="workoutMoments" hidden><h4>Watch key moments</h4><ul id="workoutMomentList"></ul></div>
     </div>
     <details id="workoutHistory" hidden><summary>Recent workouts on this device</summary><ul id="workoutHistoryList"></ul></details>
   </section>
