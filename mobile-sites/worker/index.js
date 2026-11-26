@@ -141,6 +141,6 @@ export default {
     if(!asset || !['GET','HEAD'].includes(request.method)) return new Response('Not found',{status:404});
     return new Response(request.method==='HEAD'?null:asset.body,{headers:{'content-type':asset.type,
       'cache-control':'no-cache','x-content-type-options':'nosniff',
-      'permissions-policy':'microphone=(self), camera=()'}});
+      'permissions-policy':'microphone=(self), camera=(self)'}});
   }
 };

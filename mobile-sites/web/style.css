@@ -41,3 +41,7 @@ progress{display:block;width:100%;accent-color:var(--mint)}@keyframes appear{fro
 .live-coach{margin:.4rem 0 .85rem;padding:.75rem .85rem;border:1px solid #4e7156;border-radius:.72rem;background:#1a2e27}
 .live-coach .pane-header{margin-bottom:.3rem}.live-coach p{margin:.4rem 0}.live-coach .row{margin:.45rem 0 .15rem}
 .live-coach a{color:var(--mint);padding:.35rem .2rem}.live-coach[data-cue="true"]{border-color:#adf689;background:#203b2b}
+.workout-screen{width:100%;max-width:42rem;margin:.8rem auto;aspect-ratio:4/3}
+.workout-screen video{width:100%;height:100%;aspect-ratio:auto;object-fit:fill}
+#workoutStatus{font-weight:700}#workoutCue{font-size:1.1rem}#workoutMetric{font-variant-numeric:tabular-nums}
+#bodyForm .form-row{grid-template-columns:repeat(auto-fit,minmax(min(100%,12rem),1fr))}

@@ -1,3 +1,6 @@
+import {WorkoutCoach,workoutMeasurement} from '../web/workout.js';
+import {openWorkoutCamera} from '../web/workout-ui.js';
+import {bodyMeasurementReview,measuredEntry} from '../web/body-measurements.js';
 import {ballMatchSample,mapCropBall} from '../web/ball-review.js';
 import {loadPlayerReference,referenceMemory,savePlayerReference,suggestedAnchor} from '../web/player-reference.js';
 import {changedScene} from '../web/scene.js';
@@ -16,6 +19,80 @@ import {openPoseReview,savePoseReview} from '../web/saved-pose.js';
 import {activeCoachingCue,drawBodyOutline,maskContours} from '../web/highlight.js';
 import {assignTrackIds,classifyKit,correctTeam,detectionTiles,kitHistogram,teamShape,teamTimeline} from '../web/team.js';
 
+const workoutPose=(style,side=0)=>{
+  const points=Array.from({length:33},()=>({x:0,y:0,z:0,visibility:0}));
+  const keys=side?[12,14,16,24,26,28]:[11,13,15,23,25,27];
+  const styles={
+    top:[[.48,.18],[.50,.29],[.50,.40],[.48,.40],[.48,.6],[.48,.82]],
+    halfway:[[.43,.24],[.48,.36],[.49,.48],[.34,.43],[.49,.55],[.49,.82]],
+    low:[[.30,.31],[.40,.43],[.49,.53],[.29,.58],[.49,.58],[.49,.82]],
+    plank:[[.25,.45],[.25,.54],[.25,.68],[.45,.45],[.63,.45],[.78,.45]],
+    bent:[[.25,.45],[.25,.54],[.25,.68],[.45,.65],[.63,.52],[.78,.45]],
+    pushLow:[[.25,.55],[.17,.55],[.17,.69],[.45,.55],[.63,.55],[.78,.55]],
+    hingeLow:[[.22,.42],[.20,.54],[.20,.68],[.5,.42],[.5,.61],[.5,.82]],
+  };
+  styles[style].forEach(([x,y],i)=>{points[keys[i]]={x,y,z:0,visibility:1};});
+  return points;
+};
+assert.equal(workoutMeasurement(workoutPose('top'),'squat',1).metric,180);
+assert.equal(workoutMeasurement(workoutPose('low'),'squat',1).metric,90);
+assert.equal(workoutMeasurement(workoutPose('top'),'pushup',1),null);
+const counting=new WorkoutCoach('squat');
+counting.read(workoutPose('top'),1,0);
+counting.read(workoutPose('halfway'),1,.2);
+counting.read(workoutPose('low'),1,.7);
+assert.equal(counting.read(workoutPose('top'),1,1.2).reps,1);
+counting.read(workoutPose('low'),1,1.5);
+counting.read(null,1,1.6);
+assert.equal(counting.read(workoutPose('top'),1,1.8).reps,1);
+assert.deepEqual(counting.summary().bottomRange,[90,90]);
+assert.ok(counting.summary().coverage<100);
+const plankCoach=new WorkoutCoach('plank');
+[0,.4,.8,1.2].forEach(time=>plankCoach.read(workoutPose('plank'),1,time));
+assert.equal(plankCoach.summary().hold,1);
+[1.5,1.7,1.9].forEach(time=>plankCoach.read(workoutPose('bent'),1,time));
+assert.match(plankCoach.summary().notes[0].cue,/hips drifted/);
+assert.equal(plankCoach.read(workoutPose('plank'),1,9).hold,1);
+for(const [mode,up,down] of [['hinge','top','hingeLow'],['pushup','plank','pushLow'],['lunge','top','low']]) {
+  const exerciseCoach=new WorkoutCoach(mode);
+  const visibleFrame=style=>{
+    const base=workoutPose(style);
+    if(mode!=='lunge')return base;
+    const support=workoutPose('top',1);
+    return base.map((joint,index)=>support[index].visibility?support[index]:joint);
+  };
+  exerciseCoach.read(visibleFrame(up),1,0);
+  exerciseCoach.read(visibleFrame(down),1,.5);
+  exerciseCoach.read(visibleFrame(down),1,.85);
+  assert.equal(exerciseCoach.read(visibleFrame(up),1,1.2).reps,1,mode);
+}
+const runningCoach=new WorkoutCoach('running');
+for(const time of [0,.2,.4])runningCoach.read(workoutPose('hingeLow'),1,time);
+assert.match(runningCoach.summary().notes[0].cue,/torso stayed/);
+assert.equal(runningCoach.summary().reps,0);
+const measured=measuredEntry({date:'2026-11-26',method:'Same scale',weight:'80',fat:25,muscle:36});
+assert.deepEqual(measured,{date:'2026-11-26',method:'Same scale',weight:80,fat:25,muscle:36});
+assert.equal(measuredEntry({date:'2026-02-30',method:'Scale',weight:80}),null);
+assert.equal(measuredEntry({date:'2026-11-26',method:'Scale',weight:80,muscle:90}),null);
+const composition=bodyMeasurementReview([
+  {date:'2026-11-20',method:'same scale',weight:81,fat:27}, {date:'2026-11-24',method:'Other scale',weight:50,fat:10},
+],measured);
+assert.deepEqual(composition,{fatMass:20,leanMass:60,changes:[
+  {field:'weight',date:'2026-11-20',difference:-1},{field:'fat',date:'2026-11-20',difference:-2},
+]});
+const permissionAbort=new AbortController();
+let resolveCameraGrant,stoppedTrack=0;
+const cameraPromise=openWorkoutCamera({getUserMedia(options){
+  assert.equal(options.audio,false);
+  return new Promise(resolve=>{resolveCameraGrant=resolve;});
+}},permissionAbort.signal);
+permissionAbort.abort();
+await assert.rejects(cameraPromise,{name:'AbortError'});
+resolveCameraGrant({getTracks:()=>[{stop(){stoppedTrack++;}}]});
+await Promise.resolve();
+assert.equal(stoppedTrack,1);
+const hostedHome=await worker.fetch(new Request('https://fixture.test/'),{});
+assert.match(hostedHome.headers.get('permissions-policy'),/camera=\(self\)/);
 assert.deepEqual(sectionRange(39,480),{start:468,end:480});
 assert.equal(sectionAt(5400,5400),449);
 assert.notEqual(await matchKey(new Blob(['a'])),await matchKey(new Blob(['b'])));

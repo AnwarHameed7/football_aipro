@@ -11,7 +11,7 @@
 </head>
 <body>
 <a href="#footage" class="skip">Skip to footage</a>
-<header><div class="brand"><span class="mark" aria-hidden="true"></span>Football AI Pro</div><nav aria-label="Workspace sections"><a href="#footage">Footage</a><a href="#technique">Technique</a><a href="#coachPanel">My coaching</a><a href="#clipsPanel">Clips</a><a href="#matchPanel">Match</a><a href="#squadPanel">Teams</a><a href="#libraryPanel">Library</a></nav></header>
+<header><div class="brand"><span class="mark" aria-hidden="true"></span>Football AI Pro</div><nav aria-label="Workspace sections"><a href="#footage">Footage</a><a href="#technique">Technique</a><a href="#coachPanel">My coaching</a><a href="#workoutPanel">Solo workout</a><a href="#clipsPanel">Clips</a><a href="#matchPanel">Match</a><a href="#squadPanel">Teams</a><a href="#libraryPanel">Library</a></nav></header>
 <main>
   <div class="heading"><h1>Review footage</h1><p>Compare technique, mark key moments, and share feedback.</p></div>
   <div class="workspace">
@@ -222,6 +222,45 @@
       <div class="row"><label><input id="teamShowLinks" type="checkbox">Draw passing links on pitch</label><button id="teamEventCsv" disabled type="button">Export suggested events CSV</button></div>
       <ul id="teamFormation"></ul><ul id="teamPossession"></ul><ul id="teamTransfers"></ul>
     </details>
+  </section>
+  <section class="panel technique" id="workoutPanel" aria-labelledby="workoutTitle">
+    <div class="pane-header"><h2 id="workoutTitle">Solo workout coach</h2></div>
+    <div class="row">
+      <label>Exercise <select id="workoutExercise"></select></label>
+      <button id="startWorkout" class="primary" type="button">Start camera</button>
+      <button id="stopWorkout" type="button" disabled>End workout</button>
+      <label><input id="workoutVoice" type="checkbox">Speak cues</label>
+    </div>
+    <p class="meta" id="workoutSetup"></p>
+    <p class="meta">Use a fixed camera and train one person at a time. The camera is processed on this device.</p>
+    <div class="screen workout-screen" id="workoutScreen" hidden>
+      <video id="workoutVideo" playsinline muted aria-label="Live workout camera"></video>
+      <canvas id="workoutOutline" aria-label="Live pose overlay"></canvas>
+    </div>
+    <div class="live-coach" aria-label="Live form feedback">
+      <p id="workoutStatus" role="status">Camera off</p>
+      <p id="workoutCue" role="status"></p><p id="workoutMetric" class="meta"></p>
+    </div>
+    <div id="workoutSummary" hidden>
+      <h3>Workout review</h3><p id="workoutReview"></p><ul id="workoutFindings"></ul>
+    </div>
+    <details id="workoutHistory" hidden><summary>Recent workouts on this device</summary><ul id="workoutHistoryList"></ul></details>
+  </section>
+  <section class="panel technique" id="bodyPanel" aria-labelledby="bodyTitle">
+    <div class="pane-header"><h2 id="bodyTitle">Body measurements</h2></div>
+    <p class="meta">Enter readings from a scale, tape or body-composition assessment. Trends use readings entered from the same method. Entries stay in this browser.</p>
+    <form id="bodyForm">
+      <div class="form-row">
+        <label>Date <input name="date" type="date" required></label>
+        <label>Measurement method <input name="method" maxlength="80" placeholder="e.g. Home scale and tape" required></label>
+        <label>Weight (kg) <input name="weight" type="number" min="10" max="500" step=".1"></label>
+        <label>Body fat (%) <input name="fat" type="number" min="1" max="80" step=".1"></label>
+        <label>Muscle mass (kg) <input name="muscle" type="number" min="1" max="250" step=".1"></label>
+        <label>Waist (cm) <input name="waist" type="number" min="20" max="300" step=".1"></label>
+      </div>
+      <button type="submit">Save measurement</button>
+    </form>
+    <p id="bodyStatus" class="meta" role="status"></p><p id="bodyTrend"></p><ul id="bodyEntries"></ul>
   </section>
   <section class="panel library" id="libraryPanel">
     <div class="pane-header"><h2>Private review library</h2><button id="refreshLibrary" type="button">Refresh</button></div>
